@@ -1,0 +1,13 @@
+{
+    "domain": "claude_marshal",
+    "name": "Claude Auto Marshalling",
+    "author": "izicubed",
+    "author_uri": "https://github.com/izicubed",
+    "description": "Automatically marshals a race after its laps are saved: each pilot's stored RSSI trace is sent to the Claude API, which chooses EnterAt/ExitAt thresholds following the RotorHazard tuning methodology; the plugin recomputes laps with RotorHazard's own crossing algorithm and previews them for review before you Apply. Includes a cancellable countdown, per-pilot and whole-race manual runs, a compact live panel on the Run and Marshal pages, native graph and lap-table integration, hard Minimum-Lap-Time and self-check safeguards, and a holeshot-aware lap count. Requires an Anthropic API key.",
+    "documentation_uri": "https://github.com/izicubed/RotorHazard-Claude-Marshal",
+    "license": "RotorHazard",
+    "license_uri": "https://github.com/RotorHazard/RotorHazard/blob/main/LICENSE",
+    "version": "1.0.0",
+    "required_rhapi_version": "1.0",
+    "dependencies": ["anthropic>=0.40"]
+}
