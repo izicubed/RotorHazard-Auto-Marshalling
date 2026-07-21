@@ -1,9 +1,14 @@
 # Claude Auto Marshalling (RotorHazard plugin)
 
-Automatically marshals a race after its laps are saved, following
-`rotorhazard_auto_marshalling_plugin_logic.md` (v0.2) — plus a **fully local
-real-time guard** that fixes missed passes (e.g. the holeshot) *while the race
-is running*, with no AI/API calls.
+Two layers of marshalling:
+
+1. **Real-time marshalling** (in-race, fully local, deterministic — **no API
+   key needed**): fixes missed passes such as the holeshot *while the race is
+   running*, so lap counts are correct immediately.
+2. **Post-race AI marshalling** (optional, needs an Anthropic API key +
+   internet), following `rotorhazard_auto_marshalling_plugin_logic.md` (v0.2).
+   Keyless or offline timers run the real-time layer alone — the post-race
+   flow is skipped automatically.
 
 ## Real-time marshalling (in-race, local)
 
