@@ -305,6 +305,67 @@
 		applyToMarshalUI._last = key;
 	}
 
+	// ---- Real-time marshalling feed (local in-race corrections) -------------
+	var rtBox;
+	function ensureRtBox() {
+		if (rtBox && rtBox.parentNode) { return rtBox; }
+		if (!rtBox) {
+			rtBox = el('div', 'rh-cm rh-cm-rt'); rtBox.id = 'rh-cm-rt';
+			rtBox.innerHTML =
+				'<div class="rh-cm-head"><div class="rh-cm-title">' +
+				'<span class="rh-cm-spark">⚡</span> Real-time Marshalling</div>' +
+				'<div class="rh-cm-rt-live"></div></div>' +
+				'<div class="rh-cm-rt-list"></div>';
+		}
+		var anchor = document.getElementById('race-graph') ||
+			document.getElementById('leaderboard');
+		if (anchor && anchor.parentNode) {
+			if (anchor.id === 'race-graph') { anchor.parentNode.insertBefore(rtBox, anchor); }
+			else { anchor.parentNode.insertBefore(rtBox, anchor.nextSibling); }
+		} else if (document.body) {
+			document.body.insertBefore(rtBox, document.body.firstChild);
+		}
+		return rtBox;
+	}
+	function fmtRaceTime(ms) {
+		var s = Math.floor(ms / 1000);
+		return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2) +
+			'.' + ('00' + Math.floor(ms % 1000 / 10)).slice(-2);
+	}
+	var RT_LABELS = {
+		holeshot: ['holeshot added', 'rh-cm-c-ok'],
+		pass: ['pass added', 'rh-cm-c-ok'],
+		pass_inserted: ['pass inserted', 'rh-cm-c-ok'],
+		stuck: ['stuck crossing fixed', 'rh-cm-c-warn']
+	};
+	function renderRt(s) {
+		s = s || {};
+		var events = s.events || [];
+		if (!events.length && !s.active) {
+			if (rtBox && rtBox.parentNode) { rtBox.classList.add('rh-cm-hidden'); }
+			return;
+		}
+		ensureRtBox();
+		rtBox.classList.remove('rh-cm-hidden');
+		rtBox.querySelector('.rh-cm-rt-live').innerHTML = s.active
+			? '<span class="rh-cm-chip rh-cm-c-info">watching</span>' : '';
+		var list = rtBox.querySelector('.rh-cm-rt-list');
+		if (!events.length) {
+			list.innerHTML = '<div class="rh-cm-rt-row rh-cm-rt-none">No corrections needed</div>';
+			return;
+		}
+		list.innerHTML = events.map(function (e) {
+			var lab = RT_LABELS[e.action] || [e.action, 'rh-cm-c-info'];
+			return '<div class="rh-cm-rt-row">' +
+				'<span class="rh-cm-seat">S' + ((e.seat | 0) + 1) + '</span>' +
+				'<span class="rh-cm-name">' + (e.callsign || 'Seat') + '</span>' +
+				chip(lab[0], lab[1]) +
+				'<span class="rh-cm-rt-detail">' + (e.detail || '') + '</span>' +
+				'<span class="rh-cm-rt-time">@ ' + fmtRaceTime(e.t_ms || 0) + '</span>' +
+				'</div>';
+		}).join('');
+	}
+
 	function sendContext() {
 		if (!onMarshalPage() || !socket) { return; }
 		var h = document.getElementById('selected_heat');
@@ -327,9 +388,11 @@
 		socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 		socket.on('connect', function () {
 			socket.emit('claude_marshal_get_state', {});
+			socket.emit('claude_marshal_rt_get', {});
 			setTimeout(sendContext, 800);
 		});
 		socket.on('claude_marshal_state', function (s) { render(s); });
+		socket.on('claude_marshal_rt', function (s) { renderRt(s); });
 		// react to pilot selection on the Marshal page
 		if (onMarshalPage()) {
 			document.addEventListener('change', function (e) {

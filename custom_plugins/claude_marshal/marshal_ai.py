@@ -222,7 +222,7 @@ class MarshalController:
 
     def _notify(self, message):
         try:
-            self._rhapi.ui.emit_priority_message(message, False)
+            self._rhapi.ui.message_notify(message)
         except Exception:
             pass
 
@@ -1005,8 +1005,8 @@ class MarshalController:
         if self._opt_bool(OPT_REPORT_ATTR, True):
             try:
                 self._rhdata.alter_savedRaceMeta(meta.id, {
-                    'attributes': [{'claude_marshal_report':
-                                    json.dumps(report, ensure_ascii=False)}]})
+                    'race_attr': 'claude_marshal_report',
+                    'value': json.dumps(report, ensure_ascii=False)})
             except Exception:
                 pass  # attribute storage is best-effort / version-sensitive
 

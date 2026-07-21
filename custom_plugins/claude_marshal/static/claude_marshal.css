@@ -109,3 +109,39 @@
 #rh-cm.rh-cm-phase-cancelled .rh-cm-foot { color: #ffb060; }
 #rh-cm.rh-cm-phase-complete .rh-cm-foot { color: #b9c4d6; }
 #rh-cm.rh-cm-phase-applied .rh-cm-foot { color: #3ddc84; }
+
+/* hide helper (used by both panels) */
+#rh-cm.rh-cm-hidden, #rh-cm-rt.rh-cm-hidden { display: none !important; }
+
+/* ---- Real-time marshalling feed (local in-race corrections) ---- */
+#rh-cm-rt {
+	display: block; width: 100%; max-width: 520px; margin: 7px auto;
+	box-sizing: border-box; background: #14171d; border: 1px solid #2b313b;
+	border-radius: 8px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+	font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	color: #eaeef4; overflow: hidden;
+}
+#rh-cm-rt .rh-cm-head { display: flex; align-items: center; gap: 6px;
+	padding: 5px 9px; background: #1b2028; border-bottom: 1px solid #262b34; }
+#rh-cm-rt .rh-cm-title { font-size: 10px; font-weight: 700;
+	letter-spacing: 0.03em; text-transform: uppercase; flex: 1 1 auto; }
+#rh-cm-rt .rh-cm-spark { color: #f5c145; margin-right: 2px; }
+#rh-cm-rt .rh-cm-rt-list { padding: 3px 0; }
+#rh-cm-rt .rh-cm-rt-row { display: flex; align-items: center; gap: 6px;
+	padding: 3px 9px; font-size: 11px; }
+#rh-cm-rt .rh-cm-rt-row + .rh-cm-rt-row { border-top: 1px solid #1d222b; }
+#rh-cm-rt .rh-cm-rt-none { color: #7d8798; font-size: 10px; }
+#rh-cm-rt .rh-cm-seat { flex: 0 0 auto; font-size: 9px; font-weight: 700;
+	color: #8fb7ff; }
+#rh-cm-rt .rh-cm-name { flex: 0 1 auto; font-weight: 600;
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#rh-cm-rt .rh-cm-rt-detail { flex: 1 1 auto; color: #9aa4b3; font-size: 10px;
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#rh-cm-rt .rh-cm-rt-time { flex: 0 0 auto; color: #7d8798; font-size: 10px;
+	font-variant-numeric: tabular-nums; }
+#rh-cm-rt .rh-cm-chip { font-size: 8px; font-weight: 700;
+	letter-spacing: 0.02em; text-transform: uppercase; padding: 1px 4px;
+	border-radius: 3px; white-space: nowrap; }
+#rh-cm-rt .rh-cm-c-ok { background: #16341f; color: #6fe89a; }
+#rh-cm-rt .rh-cm-c-warn { background: #3a2f12; color: #f5c145; }
+#rh-cm-rt .rh-cm-c-info { background: #1d2b3a; color: #8fb7ff; }
