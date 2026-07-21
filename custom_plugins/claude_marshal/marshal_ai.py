@@ -276,6 +276,13 @@ class MarshalController:
     def on_laps_save(self, args):
         if not self._opt_bool(OPT_ENABLED, False):
             return
+        # No Claude available (no API key): the fully local real-time guard is
+        # the marshalling story — skip the post-race AI flow entirely instead
+        # of running it just to raise "add API key" blockers.
+        if not self._opt(OPT_API_KEY):
+            logger.info('claude_marshal: no API key — post-race AI marshalling '
+                        'skipped (real-time guard remains active)')
+            return
         race_id = (args or {}).get('race_id')
         if race_id is None:
             return
@@ -438,6 +445,10 @@ class MarshalController:
                 rep = self._process_pilot(client, r, meta, start_time, fmt, opts,
                                           siblings, timefmt, force_ai)
                 rep['seconds'] = round(monotonic() - pt, 1)
+                if rep.pop('_ai_offline', False) and client is not None:
+                    client = None   # Claude unreachable: local-only from here on
+                    logger.warning('claude_marshal: Claude unreachable — '
+                                   'continuing without AI for remaining pilots')
                 reports.append(rep)
                 if entry:
                     entry.update(status=('err' if rep['blockers'] else
@@ -574,6 +585,8 @@ class MarshalController:
             except Exception as ex:
                 logger.exception('claude re-tune failed for seat %s', run.node_index)
                 rep['warnings'].append('AI_RETHRESHOLD_ERROR')
+                if type(ex).__name__ in ('APIConnectionError', 'APITimeoutError'):
+                    rep['_ai_offline'] = True   # network down: stop trying
                 if bad:
                     rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
         elif bad:
@@ -862,7 +875,10 @@ class MarshalController:
             return None
         try:
             import anthropic
-            return anthropic.Anthropic(api_key=self._opt(OPT_API_KEY))
+            # Bounded timeout / single retry so an offline timer (race site
+            # with no internet) fails fast instead of stalling the whole run.
+            return anthropic.Anthropic(api_key=self._opt(OPT_API_KEY),
+                                       timeout=20.0, max_retries=1)
         except Exception:
             logger.exception('anthropic client init failed')
             return None
