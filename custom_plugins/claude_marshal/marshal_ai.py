@@ -52,6 +52,7 @@ OPT_HISTORY_MIN = 'cm_history_min_laps'
 OPT_DEL_MANUAL = 'cm_allow_delete_manual'
 OPT_DEL_API = 'cm_allow_delete_api'
 OPT_REPORT_ATTR = 'cm_report_attr'
+OPT_THEME = 'cm_theme'
 
 # Socket events (server <-> browser)
 STATE_EVENT = 'claude_marshal_state'
@@ -173,6 +174,13 @@ class MarshalController:
         opt(OPT_REPORT_ATTR, 'Store report on the saved race',
             UIFieldType.CHECKBOX, True,
             'Best-effort: attach the run report to the race as an attribute.')
+        opt(OPT_THEME, 'Panel theme', UIFieldType.SELECT, 'dark',
+            'Colour scheme of the marshalling panels on the Run and Marshal '
+            'pages. Auto follows each viewer\'s browser/OS light-dark '
+            'preference. Applies live, no reload needed.', options=[
+                UIFieldSelectOption('dark', 'Dark'),
+                UIFieldSelectOption('light', 'Light'),
+                UIFieldSelectOption('auto', 'Auto (follow browser/OS)')])
 
         self._register_loader(ui)
 
@@ -231,16 +239,24 @@ class MarshalController:
     def _push(self):
         if self._state.get('phase') == 'running':
             self._state['elapsed'] = round(monotonic() - self._t0, 1)
+        self._state['theme'] = self._opt(OPT_THEME, 'dark')
         try:
             self._rhapi.ui.socket_broadcast(STATE_EVENT, self._state)
         except Exception:
             logger.exception('claude_marshal state broadcast failed')
 
     def on_get_state(self, _data=None):
+        self._state['theme'] = self._opt(OPT_THEME, 'dark')
         try:
             self._rhapi.ui.socket_send(STATE_EVENT, self._state)
         except Exception:
             logger.exception('claude_marshal state send failed')
+
+    def on_option_set(self, args):
+        '''Re-broadcast the panel state when the theme option changes so all
+        open pages restyle immediately.'''
+        if (args or {}).get('option') == OPT_THEME:
+            self._push()
 
     def _seat_entry(self, seat):
         for p in self._state.get('pilots', []):

@@ -49,3 +49,8 @@ def initialize(rhapi):
     rhapi.events.on(Evt.LAPS_RESAVE, guard.on_laps_resave,
                     name='claude_marshal_rt_resave')
     rhapi.ui.socket_listen(EV_RT_GET, guard.on_rt_get)
+    # Theme option (cm_theme) changed: restyle both panels live.
+    rhapi.events.on(Evt.OPTION_SET, controller.on_option_set,
+                    name='claude_marshal_theme')
+    rhapi.events.on(Evt.OPTION_SET, guard.on_option_set,
+                    name='claude_marshal_rt_theme')

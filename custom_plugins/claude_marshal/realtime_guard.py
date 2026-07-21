@@ -220,7 +220,13 @@ class RealtimeGuard:
     # ------------------------------------------------------------- feed push
 
     def _snapshot(self):
-        return {'active': self._active, 'events': self._events[-12:]}
+        return {'active': self._active, 'events': self._events[-12:],
+                'theme': self._opt('cm_theme', 'dark')}
+
+    def on_option_set(self, args):
+        '''Restyle the live feed immediately when the theme option changes.'''
+        if (args or {}).get('option') == 'cm_theme':
+            self._push()
 
     def _push(self):
         try:

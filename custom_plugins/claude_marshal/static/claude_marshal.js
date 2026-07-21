@@ -11,6 +11,28 @@
 
 	var socket = null, state = {}, lastElapsed = 0, lastTs = 0, running = false, ticker = null;
 
+	// ------------------------------------------------------------------ theme
+	// 'dark' (default), 'light', or 'auto' (follow the browser/OS preference).
+	// Delivered by the server in the state and realtime-feed payloads from the
+	// plugin's Theme option; purely a class toggle — all colours live in CSS.
+	var theme = 'dark';
+	var lightMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+
+	function isLight() {
+		if (theme === 'light') return true;
+		if (theme === 'auto') return !!(lightMq && lightMq.matches);
+		return false;
+	}
+	function noteTheme(s) {
+		if (s && s.theme && s.theme !== theme) { theme = s.theme; }
+	}
+	function applyThemeClasses() {
+		var p = document.getElementById('rh-cm');
+		if (p) p.classList.toggle('rh-cm-light', isLight());
+		var rt = document.getElementById('rh-cm-rt');
+		if (rt) rt.classList.toggle('rh-cm-light', isLight());
+	}
+
 	function ensureCss() {
 		if (document.getElementById('rh-cm-css')) { return; }
 		var l = document.createElement('link');
@@ -148,10 +170,12 @@
 
 	function render(s) {
 		state = s || {};
+		noteTheme(state);
 		var phase = state.phase || 'idle';
 		var isMarshal = onMarshalPage();
 		var isRun = onRunPage() && !isMarshal;
 		ensurePanel();
+		applyThemeClasses();
 		// On /run only the auto flow (current heat just saved) is relevant — never
 		// a previously selected/marshalled race.
 		if (isRun && state.origin !== 'auto') {
@@ -164,7 +188,8 @@
 			return;
 		}
 		panel.classList.remove('rh-cm-hidden');
-		panel.className = 'rh-cm rh-cm-phase-' + phase;
+		panel.className = 'rh-cm rh-cm-phase-' + phase +
+			(isLight() ? ' rh-cm-light' : '');
 
 		q('.rh-cm-mode').innerHTML = (phase === 'complete' && state.can_apply)
 			? chip('review', 'rh-cm-c-warn') : (phase === 'applied' ? chip('applied', 'rh-cm-c-ok') : '');
@@ -340,6 +365,7 @@
 	};
 	function renderRt(s) {
 		s = s || {};
+		noteTheme(s);
 		var events = s.events || [];
 		if (!events.length && !s.active) {
 			if (rtBox && rtBox.parentNode) { rtBox.classList.add('rh-cm-hidden'); }
@@ -347,6 +373,7 @@
 		}
 		ensureRtBox();
 		rtBox.classList.remove('rh-cm-hidden');
+		rtBox.classList.toggle('rh-cm-light', isLight());
 		rtBox.querySelector('.rh-cm-rt-live').innerHTML = s.active
 			? '<span class="rh-cm-chip rh-cm-c-info">watching</span>' : '';
 		var list = rtBox.querySelector('.rh-cm-rt-list');
@@ -393,6 +420,12 @@
 		});
 		socket.on('claude_marshal_state', function (s) { render(s); });
 		socket.on('claude_marshal_rt', function (s) { renderRt(s); });
+		// In Auto mode follow live OS/browser scheme changes.
+		if (lightMq) {
+			var onScheme = function () { if (theme === 'auto') applyThemeClasses(); };
+			if (lightMq.addEventListener) lightMq.addEventListener('change', onScheme);
+			else if (lightMq.addListener) lightMq.addListener(onScheme);
+		}
 		// react to pilot selection on the Marshal page
 		if (onMarshalPage()) {
 			document.addEventListener('change', function (e) {

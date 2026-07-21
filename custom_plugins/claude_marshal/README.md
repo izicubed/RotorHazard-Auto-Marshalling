@@ -111,6 +111,7 @@ dependency; the community installer does this automatically). Then open
 | Real-time: fix stuck crossings | on | Raise ExitAt + force-end the crossing. |
 | Real-time: max corrections per pilot | 3 | Safety cap per race. |
 | Real-time: learn from manual marshalling | on | Per-pilot priors + feedback tuning. |
+| Panel theme | dark | Dark / Light / Auto (browser/OS); applies live. |
 
 > First runs: leave **Dry-run on** to preview. When happy, enable **Auto-marshal**
 > and untick **Dry-run** to let it save.
