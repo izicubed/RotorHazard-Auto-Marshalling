@@ -53,7 +53,7 @@
 	// Friendly, non-scary labels for status codes (chip text + tooltip).
 	var LABELS = {
 		BAD_CALIBRATION_UNRESOLVED: ['check manually', 'Automatic thresholds could not be resolved — review on the Marshal graph.'],
-		BAD_CALIBRATION_NO_API: ['add API key', 'Calibration looks off, but no Claude API key is set to re-tune it.'],
+		BAD_CALIBRATION_NO_API: ['no AI available', 'Calibration looks off, but Claude is unavailable (no API key or offline) — review on the Marshal graph.'],
 		AI_RETHRESHOLD_ERROR: ['AI unavailable', 'The Claude re-tune request failed.'],
 		PROTECTED_LAP_UNDER_MIN_LAP: ['short manual lap', 'A manual/API lap is shorter than the Minimum Lap Time; left untouched.'],
 		HIGH_CONFIDENCE_SHORT_FALSE_PASS: ['likely false lap', 'A lap is far faster than this pilot usually flies.'],

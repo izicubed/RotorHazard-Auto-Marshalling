@@ -358,7 +358,34 @@ class MarshalController:
 
     # ------------------------------------------------------------- countdown
 
+    def _claude_reachable(self, timeout=3.0):
+        '''Quick TCP probe: is the Claude API reachable right now? Keeps an
+        offline race-site timer on the real-time guard alone instead of
+        running an AI flow that can only fail. IPv4 is forced — under
+        gevent's resolver an IPv6-first connect can stall on hosts with a
+        broken v6 route even though the network is fine.'''
+        import socket as pysock
+        try:
+            infos = pysock.getaddrinfo('api.anthropic.com', 443,
+                                       pysock.AF_INET, pysock.SOCK_STREAM)
+            s = pysock.socket(pysock.AF_INET, pysock.SOCK_STREAM)
+            s.settimeout(timeout)
+            try:
+                s.connect(infos[0][4])
+            finally:
+                s.close()
+            return True
+        except Exception:
+            return False
+
     def _countdown_then_run(self, race_id):
+        # No internet: real-time marshalling is the whole story — skip the
+        # post-race AI flow silently (mirrors the no-API-key behavior).
+        if not self._claude_reachable():
+            logger.info('claude_marshal: Claude API unreachable (offline?) — '
+                        'post-race AI marshalling skipped (real-time guard '
+                        'remains active)')
+            return
         seconds = max(0, self._opt_int(OPT_COUNTDOWN, 5))
         self._pending[race_id] = {'cancelled': False}
         meta = self._safe(lambda: self._rhdata.get_savedRaceMeta(race_id))
@@ -433,6 +460,14 @@ class MarshalController:
             reports = []
             cancelled = False
             client = self._make_client()
+            if client is not None and not self._claude_reachable():
+                # Manual run while offline: recompute locally right away
+                # instead of timing out against the API for every pilot.
+                client = None
+                logger.warning('claude_marshal: Claude API unreachable — '
+                               'marshalling locally without AI')
+                self._notify('Claude unreachable — marshalling locally '
+                             'without AI')
             for r in runs:
                 if race_id in self._cancel_races:   # user pressed Stop
                     cancelled = True
