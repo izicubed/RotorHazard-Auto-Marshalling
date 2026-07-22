@@ -103,6 +103,47 @@
 
 /* ---------------------------------------------------------- main panel */
 
+/* Shared dock for our plugin panels above the pilot table on the Run page
+   (created by whichever of our plugins loads first; the same rules ship with
+   each of them). Panels sit side by side, stretch to equal height, and wrap
+   onto a new row when the screen is too narrow. */
+#rh-plugin-dock {
+	display: flex; flex-wrap: wrap; gap: 8px;
+	align-items: stretch; justify-content: center;
+	margin: 7px 0; width: 100%;
+}
+#rh-plugin-dock #rh-cm { margin: 0; order: 2; flex: 0 1 auto;
+	width: auto; min-width: 340px; }
+#rh-plugin-dock #rh-cm-rt { margin: 0; order: 3; flex: 0 1 auto;
+	width: auto; min-width: 340px; }
+#rh-plugin-dock #rh-cm, #rh-plugin-dock #rh-cm-rt {
+	display: flex; flex-direction: column; }
+#rh-plugin-dock #rh-cm .rh-cm-foot { margin-top: auto; }
+#rh-plugin-dock #rh-cm-rt .rh-cm-rt-list { flex: 1 1 auto; }
+
+/* collapsed to a slim header bar (Run page default; expands when action is
+   needed or on header click) */
+#rh-cm .rh-cm-head, #rh-cm-rt .rh-cm-head { cursor: pointer; user-select: none; }
+#rh-cm.rh-cm-static .rh-cm-head { cursor: default; }
+#rh-cm.rh-cm-static .rh-cm-chev { display: none; }
+#rh-cm .rh-cm-chev, #rh-cm-rt .rh-cm-chev { font-size: 9px; color: var(--cm-muted); }
+#rh-cm .rh-cm-headsum, #rh-cm-rt .rh-cm-headsum {
+	display: flex; align-items: center; gap: 5px; }
+#rh-cm .rh-cm-headmut, #rh-cm-rt .rh-cm-headmut {
+	font-size: 10px; color: var(--cm-muted); white-space: nowrap; }
+#rh-cm.rh-cm-collapsed .rh-cm-sub, #rh-cm.rh-cm-collapsed .rh-cm-ctl,
+#rh-cm.rh-cm-collapsed .rh-cm-track, #rh-cm.rh-cm-collapsed .rh-cm-rows,
+#rh-cm.rh-cm-collapsed .rh-cm-foot { display: none; }
+#rh-cm-rt.rh-cm-collapsed .rh-cm-rt-list { display: none; }
+#rh-cm.rh-cm-collapsed .rh-cm-head,
+#rh-cm-rt.rh-cm-collapsed .rh-cm-head { border-bottom: none; }
+
+/* no corrections yet: a single-line bar — the summary lives in the header,
+   there is nothing to expand, so no chevron and no pointer */
+#rh-cm-rt.rh-cm-empty .rh-cm-rt-list { display: none; }
+#rh-cm-rt.rh-cm-empty .rh-cm-head { border-bottom: none; cursor: default; }
+#rh-cm-rt.rh-cm-empty .rh-cm-chev { display: none; }
+
 #rh-cm {
 	display: block; width: 100%; max-width: 520px; margin: 7px auto;
 	box-sizing: border-box; background: var(--cm-bg);
@@ -236,7 +277,9 @@
 	padding: 5px 9px; background: var(--cm-head-bg);
 	border-bottom: 1px solid var(--cm-edge); }
 #rh-cm-rt .rh-cm-title { font-size: 10px; font-weight: 700;
-	letter-spacing: 0.03em; text-transform: uppercase; flex: 1 1 auto; }
+	letter-spacing: 0.03em; text-transform: uppercase; flex: 1 1 auto;
+	white-space: nowrap; }
+#rh-cm-rt .rh-cm-rt-live { display: flex; align-items: center; gap: 3px; }
 #rh-cm-rt .rh-cm-spark { color: var(--cm-rt-spark); margin-right: 2px; }
 #rh-cm-rt .rh-cm-rt-list { padding: 3px 0; }
 #rh-cm-rt .rh-cm-rt-row { display: flex; align-items: center; gap: 6px;

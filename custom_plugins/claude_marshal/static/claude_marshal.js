@@ -74,35 +74,81 @@
 	}
 
 	var panel;
+	// Shared dock for our plugin panels (gate calibration, auto marshalling, …)
+	// above the pilot table on the Run page. Whichever plugin loads first
+	// creates it; panels order themselves via CSS `order` and wrap onto a new
+	// row when the screen is too narrow.
+	function dock() {
+		var d = document.getElementById('rh-plugin-dock');
+		if (d) { return d; }
+		var anchor = document.getElementById('leaderboard');
+		if (!anchor || !anchor.parentNode) { return null; }
+		d = el('div', 'rh-plugin-dock');
+		d.id = 'rh-plugin-dock';
+		anchor.parentNode.insertBefore(d, anchor);
+		return d;
+	}
 	function place() {
-		if (panel && panel.parentNode) { return; }
 		if (!panel) { return; }
 		var anchor = document.getElementById('race-graph');   // Marshal: above graph
 		if (anchor && anchor.parentNode) {
-			anchor.parentNode.insertBefore(panel, anchor);
+			if (panel.parentNode !== anchor.parentNode) {
+				anchor.parentNode.insertBefore(panel, anchor);
+			}
 			return;
 		}
-		anchor = document.getElementById('leaderboard');       // Run: under table
-		if (anchor && anchor.parentNode) {
-			anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+		var d = dock();                                        // Run: plugin dock above the pilot table
+		if (d) {
+			if (panel.parentNode !== d) { d.appendChild(panel); }
 			return;
 		}
+		if (panel.parentNode) { return; }
 		anchor = document.getElementById('rh-topbar');
 		if (anchor && anchor.parentNode) { anchor.parentNode.insertBefore(panel, anchor.nextSibling); return; }
 		if (document.body) { document.body.insertBefore(panel, document.body.firstChild); }
+	}
+
+	// ------------------------------------------------------------- collapse
+	// On the Run page the panel is collapsed to a slim bar by default and only
+	// expands itself when the operator needs to act (countdown, run in
+	// progress, review after a run, error). Expanding by hand is session-only.
+	var userOpen = null, autoOpen = false, lastOpenKey = '';
+	function collapsible() { return !onMarshalPage(); }
+	function openKey() {
+		var phase = state.phase || 'idle';
+		if (phase === 'complete' && state.can_apply) { return 'review:' + (state.race_id || ''); }
+		if (phase === 'error') { return 'error:' + (state.message || ''); }
+		return '';
+	}
+	function isOpen() {
+		if (!collapsible()) { return true; }
+		var phase = state.phase || 'idle';
+		if (phase === 'waiting_countdown' || phase === 'running') { return true; }
+		if (userOpen !== null) { return userOpen; }
+		return autoOpen;
 	}
 
 	function ensurePanel() {
 		if (panel) { place(); return panel; }
 		panel = el('div', 'rh-cm'); panel.id = 'rh-cm';
 		panel.innerHTML =
-			'<div class="rh-cm-head"><div class="rh-cm-title"><span class="rh-cm-spark">✦</span> Auto Marshalling</div>' +
+			'<div class="rh-cm-head"><span class="rh-cm-chev">▸</span>' +
+			'<div class="rh-cm-title"><span class="rh-cm-spark">✦</span> Auto Marshalling</div>' +
+			'<div class="rh-cm-headsum"></div>' +
 			'<div class="rh-cm-mode"></div><div class="rh-cm-timer"></div></div>' +
 			'<div class="rh-cm-sub"></div>' +
 			'<div class="rh-cm-ctl"></div>' +
 			'<div class="rh-cm-track"><div class="rh-cm-bar"></div></div>' +
 			'<div class="rh-cm-rows"></div>' +
 			'<div class="rh-cm-foot"></div>';
+		panel.querySelector('.rh-cm-head').addEventListener('click', function (e) {
+			if (e.target.closest('button, input')) { return; }
+			if (!collapsible()) { return; }
+			var phase = state.phase || 'idle';
+			if (phase === 'waiting_countdown' || phase === 'running') { return; }
+			userOpen = !isOpen(); autoOpen = false;
+			render(state);
+		});
 		place();
 		return panel;
 	}
@@ -188,8 +234,20 @@
 			return;
 		}
 		panel.classList.remove('rh-cm-hidden');
+
+		// auto-expand once when something newly actionable appears (a run that
+		// finished with values to review, or an error); reset when it is gone
+		var key = openKey();
+		if (key && key !== lastOpenKey) { autoOpen = true; userOpen = null; }
+		if (!key && phase !== 'waiting_countdown' && phase !== 'running') { autoOpen = false; }
+		lastOpenKey = key;
+
+		var open = isOpen();
 		panel.className = 'rh-cm rh-cm-phase-' + phase +
+			(open ? '' : ' rh-cm-collapsed') +
+			(collapsible() ? '' : ' rh-cm-static') +
 			(isLight() ? ' rh-cm-light' : '');
+		q('.rh-cm-chev').textContent = open ? '▾' : '▸';
 
 		q('.rh-cm-mode').innerHTML = (phase === 'complete' && state.can_apply)
 			? chip('review', 'rh-cm-c-warn') : (phase === 'applied' ? chip('applied', 'rh-cm-c-ok') : '');
@@ -199,6 +257,16 @@
 		if (state.round) { bits.push('Round ' + state.round); }
 		if (state.model && phase !== 'idle') { bits.push(state.model); }
 		q('.rh-cm-sub').textContent = bits.join('  ·  ');
+
+		// collapsed-header summary: enough context without expanding
+		var sum = q('.rh-cm-headsum'); sum.innerHTML = '';
+		if (!open) {
+			if (phase === 'error') {
+				sum.innerHTML = chip('error', 'rh-cm-c-warn');
+			} else if (bits.length) {
+				sum.innerHTML = '<span class="rh-cm-headmut">' + bits.slice(0, 2).join(' · ') + '</span>';
+			}
+		}
 
 		// controls
 		var ctl = q('.rh-cm-ctl'); ctl.innerHTML = '';
@@ -331,23 +399,46 @@
 	}
 
 	// ---- Real-time marshalling feed (local in-race corrections) -------------
-	var rtBox;
+	// A single-line bar while there are no corrections (the summary lives in
+	// the header). With corrections it is expanded during the race and
+	// auto-expands when a new one arrives; expanding by hand is session-only.
+	var rtBox, rtUserOpen = null, rtAutoOpen = false, rtSeenCount = 0;
+	function rtIsOpen() {
+		if (rtUserOpen !== null) { return rtUserOpen; }
+		return rtAutoOpen;
+	}
 	function ensureRtBox() {
-		if (rtBox && rtBox.parentNode) { return rtBox; }
 		if (!rtBox) {
 			rtBox = el('div', 'rh-cm rh-cm-rt'); rtBox.id = 'rh-cm-rt';
 			rtBox.innerHTML =
-				'<div class="rh-cm-head"><div class="rh-cm-title">' +
+				'<div class="rh-cm-head"><span class="rh-cm-chev">▸</span>' +
+				'<div class="rh-cm-title">' +
 				'<span class="rh-cm-spark">⚡</span> Real-time Marshalling</div>' +
+				'<div class="rh-cm-headsum"></div>' +
 				'<div class="rh-cm-rt-live"></div></div>' +
 				'<div class="rh-cm-rt-list"></div>';
+			rtBox.querySelector('.rh-cm-head').addEventListener('click', function (e) {
+				if (e.target.closest('button, input')) { return; }
+				var last = renderRt._last || {};
+				if (!(last.events || []).length) { return; }   // nothing to expand
+				if (last.active) { return; }                   // forced open during the race
+				rtUserOpen = !rtIsOpen(); rtAutoOpen = false;
+				renderRt(last);
+			});
 		}
-		var anchor = document.getElementById('race-graph') ||
-			document.getElementById('leaderboard');
+		var anchor = document.getElementById('race-graph');    // Marshal: above graph
 		if (anchor && anchor.parentNode) {
-			if (anchor.id === 'race-graph') { anchor.parentNode.insertBefore(rtBox, anchor); }
-			else { anchor.parentNode.insertBefore(rtBox, anchor.nextSibling); }
-		} else if (document.body) {
+			if (rtBox.parentNode !== anchor.parentNode) {
+				anchor.parentNode.insertBefore(rtBox, anchor);
+			}
+			return rtBox;
+		}
+		var d = dock();                                        // Run: plugin dock above the pilot table
+		if (d) {
+			if (rtBox.parentNode !== d) { d.appendChild(rtBox); }
+			return rtBox;
+		}
+		if (!rtBox.parentNode && document.body) {
 			document.body.insertBefore(rtBox, document.body.firstChild);
 		}
 		return rtBox;
@@ -365,22 +456,44 @@
 	};
 	function renderRt(s) {
 		s = s || {};
+		renderRt._last = s;
 		noteTheme(s);
 		var events = s.events || [];
 		if (!events.length && !s.active) {
 			if (rtBox && rtBox.parentNode) { rtBox.classList.add('rh-cm-hidden'); }
+			rtAutoOpen = false; rtSeenCount = 0;
 			return;
 		}
 		ensureRtBox();
+
+		// a new correction arriving expands the feed for this page session
+		if (events.length > rtSeenCount) { rtAutoOpen = true; rtUserOpen = null; }
+		rtSeenCount = events.length;
+
+		// no corrections → nothing to expand: a single-line bar with the
+		// summary in the header; with corrections the feed is forced open
+		// while the race runs (watching) and toggleable otherwise
+		var empty = !events.length;
+		var open = !empty && (s.active ? true : rtIsOpen());
 		rtBox.classList.remove('rh-cm-hidden');
+		rtBox.classList.toggle('rh-cm-collapsed', !open);
+		rtBox.classList.toggle('rh-cm-empty', empty);
 		rtBox.classList.toggle('rh-cm-light', isLight());
+		rtBox.querySelector('.rh-cm-chev').textContent = open ? '▾' : '▸';
 		rtBox.querySelector('.rh-cm-rt-live').innerHTML = s.active
 			? '<span class="rh-cm-chip rh-cm-c-info">watching</span>' : '';
-		var list = rtBox.querySelector('.rh-cm-rt-list');
-		if (!events.length) {
-			list.innerHTML = '<div class="rh-cm-rt-row rh-cm-rt-none">No corrections needed</div>';
-			return;
+
+		// header summary: correction count without expanding
+		var sum = rtBox.querySelector('.rh-cm-headsum'); sum.innerHTML = '';
+		if (empty) {
+			sum.innerHTML = '<span class="rh-cm-headmut">no corrections</span>';
+		} else if (!open) {
+			sum.innerHTML = '<span class="rh-cm-headmut">' + events.length +
+				' correction' + (events.length === 1 ? '' : 's') + '</span>';
 		}
+
+		var list = rtBox.querySelector('.rh-cm-rt-list');
+		if (empty) { list.innerHTML = ''; return; }
 		list.innerHTML = events.map(function (e) {
 			var lab = RT_LABELS[e.action] || [e.action, 'rh-cm-c-info'];
 			return '<div class="rh-cm-rt-row">' +

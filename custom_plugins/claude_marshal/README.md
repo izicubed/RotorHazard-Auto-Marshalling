@@ -83,7 +83,7 @@ fix, per-pilot cap).
 
 A panel is injected on:
 
-- **Run** — under the pilot/leaderboard table.
+- **Run** — in a shared plugin bar above the pilot/leaderboard table (side by side with our other plugin panels; collapsed to a slim bar until action is needed).
 - **Marshal** — above the RSSI graph.
 
 It shows the countdown + cancel, per-pilot status (chosen EnterAt/ExitAt, lap
