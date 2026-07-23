@@ -120,6 +120,12 @@
 	display: flex; flex-direction: column; }
 #rh-plugin-dock #rh-cm .rh-cm-foot { margin-top: auto; }
 #rh-plugin-dock #rh-cm-rt .rh-cm-rt-list { flex: 1 1 auto; }
+/* a COLLAPSED panel must stay a slim bar — never stretch to the height of
+   an expanded neighbour (rules cover both our plugins, whichever CSS wins) */
+#rh-plugin-dock > #rh-gc.rh-gc-collapsed,
+#rh-plugin-dock > #rh-cm.rh-cm-collapsed,
+#rh-plugin-dock > #rh-cm-rt.rh-cm-collapsed,
+#rh-plugin-dock > #rh-cm-rt.rh-cm-empty { align-self: flex-start; }
 
 /* collapsed to a slim header bar (Run page default; expands when action is
    needed or on header click) */
