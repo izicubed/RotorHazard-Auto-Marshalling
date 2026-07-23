@@ -135,6 +135,7 @@
 			'<div class="rh-cm-head"><span class="rh-cm-chev">▸</span>' +
 			'<div class="rh-cm-title"><span class="rh-cm-spark">✦</span> Auto Marshalling</div>' +
 			'<div class="rh-cm-headsum"></div>' +
+			'<button class="rh-cm-toggle" title="Enable/disable automatic marshalling (post-race flow and in-race corrections). Manual runs from the Marshal page always work."></button>' +
 			'<div class="rh-cm-mode"></div><div class="rh-cm-timer"></div></div>' +
 			'<div class="rh-cm-sub"></div>' +
 			'<div class="rh-cm-ctl"></div>' +
@@ -148,6 +149,9 @@
 			if (phase === 'waiting_countdown' || phase === 'running') { return; }
 			userOpen = !isOpen(); autoOpen = false;
 			render(state);
+		});
+		panel.querySelector('.rh-cm-toggle').addEventListener('click', function () {
+			socket.emit('claude_marshal_set_enabled', { enabled: !state.enabled });
 		});
 		place();
 		return panel;
@@ -164,6 +168,14 @@
 
 	function busy() { return state.phase === 'running' || state.phase === 'waiting_countdown'; }
 	function seatLabel(s) { return 'S' + ((s | 0) + 1); }
+
+	function renderToggle() {
+		var b = panel && panel.querySelector('.rh-cm-toggle');
+		if (!b) { return; }
+		var on = state.enabled !== false;
+		b.textContent = on ? 'Auto: ON' : 'Auto: OFF';
+		b.classList.toggle('rh-cm-toggle-off', !on);
+	}
 
 	function chip(text, cls) { return '<span class="rh-cm-chip ' + cls + '">' + text + '</span>'; }
 
@@ -222,18 +234,30 @@
 		var isRun = onRunPage() && !isMarshal;
 		ensurePanel();
 		applyThemeClasses();
-		// On /run only the auto flow (current heat just saved) is relevant — never
-		// a previously selected/marshalled race.
-		if (isRun && state.origin !== 'auto') {
-			panel.classList.add('rh-cm-hidden');
-			return;
-		}
-		// Hide only when idle with no heat context yet; otherwise always show.
-		if (phase === 'idle' && !(state.pilots && state.pilots.length)) {
-			panel.classList.add('rh-cm-hidden');
-			return;
-		}
+		renderToggle();
+		// With nothing to show, keep a minimal slim bar so the operator always
+		// has the Enabled/Disabled switch at hand: on /run when the state
+		// belongs to a marshal-page action (only the auto flow is relevant
+		// there), and anywhere while idle with no heat context yet.
+		var minimal = (isRun && state.origin !== 'auto') ||
+			(phase === 'idle' && !(state.pilots && state.pilots.length));
 		panel.classList.remove('rh-cm-hidden');
+		if (minimal) {
+			panel.className = 'rh-cm rh-cm-collapsed rh-cm-min' +
+				(isLight() ? ' rh-cm-light' : '');
+			renderToggle();
+			q('.rh-cm-headsum').innerHTML = (state.enabled === false)
+				? '<span class="rh-cm-headmut">automatic marshalling is off</span>' : '';
+			q('.rh-cm-mode').innerHTML = '';
+			q('.rh-cm-sub').textContent = '';
+			q('.rh-cm-ctl').innerHTML = '';
+			q('.rh-cm-rows').innerHTML = '';
+			q('.rh-cm-foot').textContent = '';
+			q('.rh-cm-timer').textContent = '';
+			q('.rh-cm-bar').style.width = '0';
+			stopTicker();
+			return;
+		}
 
 		// auto-expand once when something newly actionable appears (a run that
 		// finished with values to review, or an error); reset when it is gone

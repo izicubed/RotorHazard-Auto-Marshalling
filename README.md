@@ -69,7 +69,10 @@ feed on the Run/Marshal pages), capped per pilot per race, and logged.
 
 A compact live panel on the **Run** page (auto flow of the just-saved heat,
 with Stop) and the **Marshal** page (per-pilot / whole-race manual runs), plus
-the real-time corrections feed. Both panels support **dark / light / auto**
+the real-time corrections feed. The panel header carries an **AUTO: ON/OFF**
+master toggle — one click disables every automatic action (the post-race flow
+and the in-race guard) for heats where you don't want it; manual runs from the
+Marshal page keep working. Both panels support **dark / light / auto**
 (browser/OS) themes — Settings → *Panel theme*.
 
 ## Requirements

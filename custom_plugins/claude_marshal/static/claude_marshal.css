@@ -144,6 +144,26 @@
 #rh-cm-rt.rh-cm-empty .rh-cm-head { border-bottom: none; cursor: default; }
 #rh-cm-rt.rh-cm-empty .rh-cm-chev { display: none; }
 
+/* minimal slim bar (no race context yet): just the title + Auto toggle */
+#rh-cm.rh-cm-min .rh-cm-head { border-bottom: none; cursor: default; }
+#rh-cm.rh-cm-min .rh-cm-chev { display: none; }
+
+/* Enabled/Disabled master toggle in the panel header */
+#rh-cm .rh-cm-toggle {
+	appearance: none; -webkit-appearance: none; cursor: pointer;
+	background: var(--cm-apply-bg); color: var(--cm-apply-fg);
+	border: 1px solid var(--cm-apply-border);
+	border-radius: 9px; padding: 1px 8px; font-size: 9px; font-weight: 700;
+	letter-spacing: 0.04em; text-transform: uppercase;
+	font-family: inherit; flex: 0 0 auto; line-height: 1.5;
+}
+#rh-cm .rh-cm-toggle:hover { background: var(--cm-apply-hover); }
+#rh-cm .rh-cm-toggle.rh-cm-toggle-off {
+	background: var(--cm-cancel-bg); color: var(--cm-cancel-fg);
+	border-color: var(--cm-cancel-border);
+}
+#rh-cm .rh-cm-toggle.rh-cm-toggle-off:hover { background: var(--cm-cancel-hover); }
+
 #rh-cm {
 	display: block; width: 100%; max-width: 520px; margin: 7px auto;
 	box-sizing: border-box; background: var(--cm-bg);

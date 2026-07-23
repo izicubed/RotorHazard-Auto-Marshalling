@@ -62,6 +62,7 @@ EV_RUN_RACE = 'claude_marshal_run_race'
 EV_RUN_PILOT = 'claude_marshal_run_pilot'
 EV_APPLY = 'claude_marshal_apply'
 EV_CONTEXT = 'claude_marshal_context'
+EV_SET_ENABLED = 'claude_marshal_set_enabled'
 
 # History thresholds (spec §9.5)
 HIST_FAST_WARN = 0.75
@@ -240,6 +241,7 @@ class MarshalController:
         if self._state.get('phase') == 'running':
             self._state['elapsed'] = round(monotonic() - self._t0, 1)
         self._state['theme'] = self._opt(OPT_THEME, 'dark')
+        self._state['enabled'] = self._opt_bool(OPT_ENABLED, True)
         try:
             self._rhapi.ui.socket_broadcast(STATE_EVENT, self._state)
         except Exception:
@@ -247,10 +249,30 @@ class MarshalController:
 
     def on_get_state(self, _data=None):
         self._state['theme'] = self._opt(OPT_THEME, 'dark')
+        self._state['enabled'] = self._opt_bool(OPT_ENABLED, True)
         try:
             self._rhapi.ui.socket_send(STATE_EVENT, self._state)
         except Exception:
             logger.exception('claude_marshal state send failed')
+
+    def on_set_enabled(self, data):
+        '''Panel Enabled/Disabled toggle: master switch for all automatic
+        marshalling (the post-race flow AND the real-time in-race guard).
+        Manual runs from the Marshal page keep working either way.'''
+        val = (data or {}).get('enabled')
+        if val is None:
+            return
+        try:
+            self._rhapi.db.option_set(OPT_ENABLED, '1' if val else '0')
+        except Exception:
+            logger.exception('claude_marshal enable toggle failed')
+            return
+        self._notify('Auto Marshalling {}'.format(
+            'enabled' if val else 'disabled — no automatic runs or in-race '
+            'corrections until re-enabled'))
+        logger.info('claude_marshal %s via panel toggle',
+                    'enabled' if val else 'disabled')
+        self._push()
 
     def on_option_set(self, args):
         '''Re-broadcast the panel state when the theme option changes so all
@@ -274,7 +296,7 @@ class MarshalController:
     # ----------------------------------------------------------- event hooks
 
     def on_laps_save(self, args):
-        if not self._opt_bool(OPT_ENABLED, False):
+        if not self._opt_bool(OPT_ENABLED, True):
             return
         # No Claude available (no API key): the fully local real-time guard is
         # the marshalling story — skip the post-race AI flow entirely instead
@@ -567,6 +589,7 @@ class MarshalController:
             return rep
 
         expected = siblings.get(run.node_index, {}).get('laps')
+        sib_thr = siblings.get(run.node_index, {}).get('thresholds')
         baseline = self._history_baseline(run.pilot_id, meta.id, opts)
         rmin, rmax = min(vals), max(vals)
 
@@ -579,7 +602,8 @@ class MarshalController:
             enter, exit_at = run.enter_at, run.exit_at
             laps = self._finalize(self._recalc(vals, times, start_time, enter, exit_at),
                                   run, opts, fmt, timefmt, rep)
-            bad = self._calibration_bad(laps, baseline, expected, exit_at, enter, rmin, rmax)
+            bad = self._calibration_bad(laps, baseline, expected, exit_at, enter,
+                                        rmin, rmax, sib_thr)
         else:
             enter, exit_at = run.enter_at, run.exit_at   # possibly invalid / None
             laps = []
@@ -604,7 +628,7 @@ class MarshalController:
                                        run, opts, fmt, timefmt, {'warnings': [], 'blockers': [],
                                                                  'deleted_count': 0})
                 still_bad = self._calibration_bad(nlaps, baseline, expected, nx, ne,
-                                                  rmin, rmax)
+                                                  rmin, rmax, sib_thr)
                 rep['reasoning'] = reason
                 changed_thr = (not stored_ok) or ne != enter or nx != exit_at
                 if (not still_bad) and self._better(nlaps, laps, expected) and changed_thr:
@@ -623,9 +647,31 @@ class MarshalController:
                 if type(ex).__name__ in ('APIConnectionError', 'APITimeoutError'):
                     rep['_ai_offline'] = True   # network down: stop trying
                 if bad:
-                    rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
+                    fixed = self._local_retune(vals, times, start_time, run, fmt,
+                                               opts, timefmt, expected, baseline,
+                                               sib_thr, laps)
+                    if fixed:
+                        laps, enter, exit_at = fixed
+                        rep['changed'] = True
+                        rep['reasoning'] = ('Local re-tune (AI unavailable): '
+                                            'thresholds matched against this '
+                                            'seat\'s other rounds.')
+                    else:
+                        rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
         elif bad:
-            rep['blockers'].append('BAD_CALIBRATION_NO_API')
+            # No AI available: try a fully local re-tune against this seat's
+            # other rounds and the trace itself before giving up. This is what
+            # makes Minimum Lap Time and threshold history count even offline.
+            fixed = self._local_retune(vals, times, start_time, run, fmt, opts,
+                                       timefmt, expected, baseline, sib_thr,
+                                       laps)
+            if fixed:
+                laps, enter, exit_at = fixed
+                rep['changed'] = True
+                rep['reasoning'] = ('Local re-tune (no AI): thresholds matched '
+                                    'against this seat\'s other rounds.')
+            else:
+                rep['blockers'].append('BAD_CALIBRATION_NO_API')
 
         rep['enter_at'], rep['exit_at'] = enter, exit_at
 
@@ -792,7 +838,8 @@ class MarshalController:
 
     # --------------------------------------------------------- diagnostics
 
-    def _calibration_bad(self, laps, baseline, expected, exit_at, enter_at, rmin, rmax):
+    def _calibration_bad(self, laps, baseline, expected, exit_at, enter_at,
+                         rmin, rmax, sib_thresholds=None):
         active = [l for l in laps if not l['deleted']]
         n = len(active)
         if n == 0:
@@ -804,6 +851,24 @@ class MarshalController:
         # EnterAt above every sample -> no real crossing can trigger.
         if enter_at > rmax:
             return True
+        # Recalc had to delete a pile of sub-Minimum-Lap crossings -> EnterAt
+        # sits in the noise band and the trace is full of false passes. (Twins
+        # of protected manual/API laps are legitimate duplicates, not noise.)
+        prot = [l['lap_time_stamp'] for l in active
+                if l['source'] in PROTECTED_SOURCES]
+        short_dels = sum(
+            1 for l in laps
+            if l['deleted'] and 'SHORT_LAP_DELETED' in (l.get('flags') or ())
+            and not any(abs(l['lap_time_stamp'] - p) <= 2500 for p in prot))
+        if short_dels >= max(3, int(0.25 * (n + short_dels))):
+            return True
+        # Far below the EnterAt this seat used in its other rounds -> almost
+        # certainly a mid-race auto-correction gone wrong, not a real change.
+        if sib_thresholds:
+            enters = [t['enter_at'] for t in sib_thresholds
+                      if t.get('enter_at')]
+            if enters and enter_at < _median(enters) - 10:
+                return True
         if baseline and baseline.get('median'):
             longest = max((l['lap_time'] for l in active if l.get('lap_time')), default=0)
             if longest > baseline['median'] * 2.5 and (expected or 2) > n:
@@ -820,6 +885,74 @@ class MarshalController:
         if expected:
             return abs(na - expected) <= abs(oa - expected)
         return na >= oa
+
+    def _local_retune(self, vals, times, start_time, run, fmt, opts, timefmt,
+                      expected, baseline, sib_thr, old_laps):
+        '''AI-free threshold repair: try the EnterAt/ExitAt this seat used in
+        its other rounds plus a probe grid over the trace span; keep the
+        candidate whose recomputed laps look most like this pilot's history
+        (no sub-Minimum-Lap noise, no merged passes, plausible count).
+        Returns (laps, enter, exit) or None when nothing plausible is found.'''
+        lo, hi = min(vals), max(vals)
+        span = hi - lo
+        if span < 15:
+            return None
+        cands = []
+        for t in (sib_thr or []):
+            e, x = t.get('enter_at'), t.get('exit_at')
+            if e and x and e > x:
+                cands.append((int(e), int(x)))
+        for f in (0.45, 0.55, 0.65, 0.75, 0.85):
+            e = int(lo + span * f)
+            x = lo + max(3, int(0.25 * (e - lo)))
+            cands.append((e, x))
+        best = None
+        for e, x in dict.fromkeys(cands):
+            if not (lo < x < e <= hi):
+                continue
+            probe_rep = {'warnings': [], 'blockers': [], 'deleted_count': 0}
+            laps = self._finalize(self._recalc(vals, times, start_time, e, x),
+                                  run, opts, fmt, timefmt, probe_rep)
+            if probe_rep['blockers']:
+                continue
+            if self._calibration_bad(laps, baseline, expected, x, e, lo, hi,
+                                     sib_thr):
+                continue
+            score = self._retune_score(laps, expected, baseline, opts)
+            if best is None or score < best[0]:
+                best = (score, e, x, laps)
+        if not best:
+            return None
+        score, e, x, laps = best
+        if not self._better(laps, old_laps, expected):
+            return None
+        logger.info('claude_marshal local re-tune seat %s: EnterAt %s ExitAt %s '
+                    '(score %.1f)', run.node_index + 1, e, x, score)
+        return laps, e, x
+
+    def _retune_score(self, laps, expected, baseline, opts):
+        '''Lower is better. Penalizes noise crossings that had to be deleted
+        as sub-Minimum-Lap, laps far off the pilot's historical pace, and
+        merged passes (a lap spanning ~two typical laps).'''
+        act = [l for l in laps if not l['deleted']]
+        score = 0.0
+        score += 5.0 * sum(
+            1 for l in laps
+            if l['deleted'] and 'SHORT_LAP_DELETED' in (l.get('flags') or ()))
+        if expected:
+            score += 3.0 * abs(len(act) - expected)
+        med = (baseline or {}).get('median')
+        for l in act:
+            if l.get('_idx', 0) <= 0 or not l.get('lap_time'):
+                continue
+            if med:
+                if l['lap_time'] > med * 1.6:
+                    score += 8.0          # likely a merged/missed pass
+                elif l['lap_time'] < med * HIST_FAST_WARN:
+                    score += 5.0          # likely a false pass
+            elif opts['min_lap_ms'] and l['lap_time'] < opts['min_lap_ms'] * 1.2:
+                score += 5.0
+        return score
 
     def _history_check(self, laps, baseline, opts, rep):
         if not baseline or not baseline.get('median'):

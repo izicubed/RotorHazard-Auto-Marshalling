@@ -62,12 +62,23 @@ SENS_MIN_RISE = {'low': 45, 'normal': 30, 'high': 18}
 # scale applied to a history-derived per-pilot rise, keyed by sensitivity
 SENS_PRIOR_SCALE = {'low': 1.3, 'normal': 1.0, 'high': 0.75}
 PRIOR_RISE_FRACTION = 0.4  # required rise = this share of the pilot's typical rise
-RISE_CLAMP = (12, 80)
+# start-line / parked-quad ripples reach ~15 over the floor, so the learned
+# per-pilot threshold must never drop into that band
+RISE_CLAMP = (16, 80)
 FAST_LAP_FRACTION = 0.6    # candidate lap < this share of pilot's median = false pass
 BIAS_STEP = 0.15           # feedback adjustment per confirmed manual correction
 BIAS_CLAMP = (0.6, 1.8)
+HOLESHOT_MIN_MS = 1000     # earliest believable first gate pass after the tone
+HOLESHOT_RISE_FACTOR = 1.3  # an early first pass needs a stronger peak
+HOLESHOT_STRICT_MS = 8000  # start-line ripple window: strong rise required inside
+TUNE_STRONG_FRACTION = 0.7  # rise share of the pilot's prior to re-tune on 1st add
+TUNE_CAP_FRACTION = 0.55   # EnterAt never re-tuned below floor + this x prior rise
+ADD_MATCH_SECS = 1.2       # feedback: an added lap survives if a final lap is this close
+HOLD_SECS = 4.5            # approach-ripple guard: wait this long before injecting
 PRIOR_TRACES = 2           # prior pilotraces parsed per seat for peak estimation
 TIMER_SOURCES = (0, 2, 3)  # LapSource REALTIME / RECALC / AUTOMATIC
+PRIOR_LAP_SOURCES = (0, 2, 3, 4)   # + API: kept guard adds are real laps too
+TUNE_SAFE_GAP = 4          # noise ceiling must sit this far under the weakest pass
 
 
 class RealtimeGuard:
@@ -158,7 +169,10 @@ class RealtimeGuard:
     # ----------------------------------------------------------- event hooks
 
     def on_race_start(self, _args=None):
-        if not self._opt_bool(OPT_RT_ENABLED, True):
+        # cm_enabled is the plugin-wide master switch (panel toggle);
+        # cm_rt_enabled additionally scopes just the real-time guard.
+        if not self._opt_bool('cm_enabled', True) \
+                or not self._opt_bool(OPT_RT_ENABLED, True):
             return
         self._gen += 1
         self._stop = False
@@ -184,7 +198,8 @@ class RealtimeGuard:
         race_id = (args or {}).get('race_id')
         if race_id is None or not self._decisions:
             return
-        self._race_log[race_id] = list(self._decisions)
+        self._race_log[race_id] = self._prune_confirmed_skips(
+            race_id, self._decisions)
         self._decisions = []
         while len(self._race_log) > 10:
             self._race_log.pop(next(iter(self._race_log)))
@@ -195,6 +210,44 @@ class RealtimeGuard:
                     'value': json.dumps(self._race_log[race_id])})
             except Exception:
                 pass  # attribute storage is best-effort / version-sensitive
+
+    def _prune_confirmed_skips(self, race_id, decisions):
+        '''Drop 'skipped' decisions that landed near a lap the timer recorded
+        anyway — or near a crossing the node started itself (even one RH then
+        discarded under Min Lap Time): those were correct duplicate
+        suppressions, NOT false negatives. Feeding them to the sensitivity
+        learning is what used to crank per-pilot thresholds down until
+        start-line ripples became "missed passes".'''
+        try:
+            rhdata = self._ctx.rhdata
+            stamps = []
+            for run in (rhdata.get_savedPilotRaces_by_savedRaceMeta(race_id)
+                        or []):
+                for l in (rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)
+                          or []):
+                    if not l.deleted:
+                        stamps.append((run.pilot_id, l.lap_time_stamp))
+        except Exception:
+            return list(decisions)
+        cross_ms = {}                     # seat -> [crossing starts, race ms]
+        start = getattr(self, '_start_mono', None)
+        if start is not None:
+            for seat, st in self._seats.items():
+                cross_ms[seat] = [(cs - start) * 1000
+                                  for cs in st.get('cross_starts', ())]
+        out = []
+        for d in decisions:
+            if d.get('outcome') == 'skipped':
+                near_lap = any(p == d.get('pilot')
+                               and abs(s - d['t_ms']) <= LAP_MATCH_SECS * 1000
+                               for p, s in stamps)
+                near_cross = any(
+                    abs(c - d['t_ms']) <= LAP_MATCH_SECS * 1000
+                    for c in cross_ms.get(d.get('seat'), ()))
+                if near_lap or near_cross:
+                    continue
+            out.append(d)
+        return out
 
     def on_laps_resave(self, args):
         '''Manual marshalling saved for one pilot: compare the operator's final
@@ -271,6 +324,7 @@ class RealtimeGuard:
 
     def _scan_all(self, ctx, race):
         import RHUtils
+        self._start_mono = race.start_time_monotonic
         sens = self._opt(OPT_RT_SENS, 'normal')
         opts = {
             'scope': self._opt(OPT_RT_SCOPE, 'all'),
@@ -288,7 +342,8 @@ class RealtimeGuard:
             if not node.frequency or pilot_id == RHUtils.PILOT_ID_NONE:
                 continue
             st = self._seats.setdefault(idx, {
-                'consumed': 0, 'fixes': 0, 'last_fix': 0.0, 'stuck_fixed': False})
+                'consumed': 0, 'fixes': 0, 'adds': 0, 'last_fix': 0.0,
+                'stuck_fixed': False})
             if st['fixes'] >= opts['max_fix']:
                 continue
             if monotonic() - st['last_fix'] < COOLDOWN_SECS:
@@ -323,7 +378,7 @@ class RealtimeGuard:
             pid = getattr(lap, 'pilot_id', None)
             if pid not in pilots or lap.deleted:
                 continue
-            if lap.source not in TIMER_SOURCES:
+            if lap.source not in PRIOR_LAP_SOURCES:
                 continue
             lt = lap.lap_time
             if lt and lt > 0 and lt >= min_lap_ms:
@@ -340,23 +395,59 @@ class RealtimeGuard:
                 cand = [pr for pr in pilotraces
                         if pr.pilot_id == pid][:PRIOR_TRACES]
             rises = []
+            weak_rise = None
+            tune_ok = True
             for pr in cand:
                 try:
                     vals = json.loads(pr.history_values)
+                    times = json.loads(pr.history_times)
                 except Exception:
                     continue
                 if not vals or len(vals) < 10:
                     continue
                 floor_h = min(vals)
-                peaks = [l.peak_rssi for l in
-                         (rhdata.get_savedRaceLaps_by_savedPilotRace(pr.id) or [])
-                         if not l.deleted and getattr(l, 'peak_rssi', None)]
+                laps = [l for l in
+                        (rhdata.get_savedRaceLaps_by_savedPilotRace(pr.id) or [])
+                        if not l.deleted]
+                peaks = [l.peak_rssi for l in laps
+                         if getattr(l, 'peak_rssi', None)]
                 top = _median(peaks) if peaks else max(vals)
                 if top and top > floor_h:
                     rises.append(top - floor_h)
+                if peaks and min(peaks) > floor_h:
+                    weak = min(peaks) - floor_h
+                    if weak_rise is None or weak < weak_rise:
+                        weak_rise = weak
+                # noise ceiling vs weakest pass: when this pilot's non-pass
+                # ripples reach as high as their weakest real pass, there is
+                # no safe band to move EnterAt into — live re-tuning down
+                # would only make the node chase noise
+                meta = None
+                try:
+                    meta = rhdata.get_savedRaceMeta(pr.race_id)
+                except Exception:
+                    pass
+                if peaks and laps and meta and len(times) == len(vals) \
+                        and times[-1] - times[0] > 30:
+                    start_s = meta.start_time
+                    stamps_s = [start_s + l.lap_time_stamp / 1000.0
+                                for l in laps]
+                    ceiling = floor_h
+                    for v, t in zip(vals, times):
+                        if all(abs(t - s) > LAP_MATCH_SECS
+                               for s in stamps_s):
+                            ceiling = max(ceiling, v)
+                    if ceiling >= min(peaks) - TUNE_SAFE_GAP:
+                        tune_ok = False
             prior = {}
             if rises:
                 prior['rise'] = int(sum(rises) / len(rises))
+            if weak_rise is not None:
+                # the pilot's weakest KEPT pass: the required rise must stay
+                # below it or real passes start getting rejected whenever the
+                # feedback bias inches up
+                prior['weak_rise'] = int(weak_rise)
+            prior['tune_ok'] = tune_ok
             lts = laps_by_pilot.get(pid) or []
             if len(lts) >= 4:
                 prior['lap_med'] = int(_median(lts))
@@ -370,12 +461,17 @@ class RealtimeGuard:
     def _seat_min_rise(self, seat, pilot_id, sens):
         '''Required peak rise for this seat: pilot's history when available,
         the global sensitivity constant otherwise, scaled by the learned
-        per-pilot feedback factor.'''
+        per-pilot feedback factor — but never above the pilot's weakest kept
+        pass, or real passes get rejected as soon as the bias inches up.'''
+        prior = self._priors.get(seat) or {}
         base = float(SENS_MIN_RISE.get(sens, 30))
-        rise = (self._priors.get(seat) or {}).get('rise')
+        rise = prior.get('rise')
         if rise:
             base = PRIOR_RISE_FRACTION * rise * SENS_PRIOR_SCALE.get(sens, 1.0)
         base *= self._bias.get(str(pilot_id), 1.0)
+        weak = prior.get('weak_rise')
+        if weak:
+            base = min(base, max(RISE_CLAMP[0], weak - 2))
         return int(max(RISE_CLAMP[0], min(RISE_CLAMP[1], base)))
 
     # ------------------------------------------------------------- per seat
@@ -383,6 +479,13 @@ class RealtimeGuard:
     def _scan_seat(self, ctx, race, node, pilot_id, st, opts):
         start = race.start_time_monotonic
         now = monotonic()
+
+        # track node crossing starts (feeds the approach-ripple guard below)
+        if node.crossing_flag and node.enter_at_timestamp:
+            cs = st.setdefault('cross_starts', [])
+            if not cs or abs(cs[-1] - node.enter_at_timestamp) > 0.05:
+                cs.append(node.enter_at_timestamp)
+                del cs[:-12]
 
         # stuck crossing: entered long ago, never exits -> ExitAt too low
         if opts['stuck'] and not st['stuck_fixed'] and node.crossing_flag \
@@ -438,26 +541,49 @@ class RealtimeGuard:
         if now - t_pk < CONFIRM_SECS:
             return 'wait'
         lap_ts_ms = (t_pk - start) * 1000
+        if lap_ts_ms <= 0:
+            return 'skip'
+        # already registered by the node? (checked before anything is logged so
+        # the feedback learning never sees correctly-suppressed duplicates)
+        for l in laps:
+            if abs(l.lap_time_stamp - lap_ts_ms) <= LAP_MATCH_SECS * 1000:
+                return 'skip'
 
-        if peak - floor < opts['min_rise']:
+        rise = peak - floor
+        if rise < opts['min_rise']:
             # tunable rejection: log prominent-enough peaks for feedback
-            if peak - floor >= 12 and lap_ts_ms > 0:
+            if rise >= 12:
                 self._log_decision(node.index, opts, lap_ts_ms, peak, floor,
                                    'skipped', 'low_rise')
             return 'skip'
         # rise on the way in too (rejects the launch-pad plateau at t=0)
         left_min = min(vals[max(0, st['consumed']):pk + 1])
-        if peak - left_min < max(10, int(0.35 * (peak - floor))):
+        if peak - left_min < max(10, int(0.35 * rise)):
             return 'skip'
 
-        if lap_ts_ms <= 0:
-            return 'skip'
-        # honor Minimum First Crossing for a would-be holeshot
-        if not laps and opts['min_first_ms'] and lap_ts_ms < opts['min_first_ms']:
-            return 'skip'
-        # already registered by the node?
-        for l in laps:
-            if abs(l.lap_time_stamp - lap_ts_ms) <= LAP_MATCH_SECS * 1000:
+        start_behavior = getattr(getattr(race, 'format', None),
+                                 'start_behavior', 0) or 0
+        if not laps:
+            # first crossing of the race. In Hole Shot formats it comes
+            # seconds after the tone; with First Crossing = First Lap or
+            # Staggered Start the craft must fly a whole lap first — gate by
+            # what is physically possible for this format/pilot.
+            earliest = max(opts['min_first_ms'], HOLESHOT_MIN_MS)
+            if start_behavior and opts.get('lap_med'):
+                # first pass = full lap: can't be faster than other laps
+                earliest = max(earliest,
+                               int(FAST_LAP_FRACTION * opts['lap_med']))
+            if lap_ts_ms < earliest:
+                self._log_decision(node.index, opts, lap_ts_ms, peak, floor,
+                                   'skipped', 'too_early')
+                return 'skip'
+            # powered quads sitting on the start line paint pass-like ripples
+            # in the first moments — require a clearly stronger peak there
+            # (late first passes are judged like any other pass)
+            if lap_ts_ms < HOLESHOT_STRICT_MS \
+                    and rise < HOLESHOT_RISE_FACTOR * opts['min_rise']:
+                self._log_decision(node.index, opts, lap_ts_ms, peak, floor,
+                                   'skipped', 'weak_holeshot')
                 return 'skip'
         # node is (or was) crossing around this peak -> it will report it itself
         if node.crossing_flag and node.enter_at_timestamp \
@@ -480,12 +606,43 @@ class RealtimeGuard:
                                'skipped', 'fast_lap')
             return 'skip'
 
+        # approach-ripple guard: a craft nearing the gate paints a small bump
+        # a few seconds before the real crossing peak. Hold the candidate; if
+        # the node starts a crossing (or a lap lands) right behind it, the
+        # candidate was the ripple of that pass — drop it.
+        if now - t_pk < HOLD_SECS:
+            return 'wait'
+        if any(t_pk < cs <= t_pk + HOLD_SECS
+               for cs in st.get('cross_starts', ())):
+            self._log_decision(node.index, opts, lap_ts_ms, peak, floor,
+                               'skipped', 'ripple_before_pass')
+            return 'skip'
+        for l in laps:
+            if lap_ts_ms < l.lap_time_stamp <= lap_ts_ms + HOLD_SECS * 1000:
+                return 'skip'   # the real pass right behind it is recorded
+
         callsign = self._callsign(pilot_id)
         tuned = ''
-        if opts['tune']:
-            tuned = self._tune(ctx, node, floor, peak)
+        prior = self._priors.get(node.index) or {}
+        prior_rise = prior.get('rise')
+        # Re-tune thresholds only on strong evidence: a peak comparable to the
+        # pilot's typical crossing, or a repeat missed pass on a seat where
+        # history gives us a safe lower bound for EnterAt. A single weak add
+        # then just fills the lap without moving EnterAt into the noise band
+        # (where the node starts over-detecting on its own). Seats whose
+        # history shows noise ripples overlapping their weakest real passes
+        # (tune_ok False) are never re-tuned down — laps are filled one by
+        # one and the operator's high EnterAt stays authoritative.
+        strong = rise >= (TUNE_STRONG_FRACTION * prior_rise if prior_rise
+                          else 1.5 * opts['min_rise'])
+        if opts['tune'] and prior.get('tune_ok', True) \
+                and (strong or (st.get('adds', 0) >= 1 and prior_rise)):
+            tuned = self._tune(ctx, node, floor, peak, prior_rise)
 
-        holeshot = not laps
+        # in First Lap / Staggered formats the first crossing is a scored lap,
+        # not a holeshot — RotorHazard numbers it per the format either way,
+        # this only affects how the correction is reported
+        holeshot = not laps and start_behavior == 0
         if not laps or lap_ts_ms > laps[-1].lap_time_stamp:
             # fast path: pass is later than everything recorded
             if self._add_lap_takes_peak(race):
@@ -505,6 +662,7 @@ class RealtimeGuard:
             action = 'holeshot' if holeshot else 'pass_inserted'
 
         st['fixes'] += 1
+        st['adds'] = st.get('adds', 0) + 1
         st['last_fix'] = now
         self._log_decision(node.index, opts, lap_ts_ms, peak, floor, 'added')
         detail = 'peak {}{}'.format(peak, tuned)
@@ -517,7 +675,7 @@ class RealtimeGuard:
 
     # ------------------------------------------------------------ corrections
 
-    def _tune(self, ctx, node, floor, peak):
+    def _tune(self, ctx, node, floor, peak, prior_rise=None):
         '''Re-tune the live node thresholds around the observed missed peak.
         Follows doc/Tuning Parameters.md: EnterAt below every true crossing
         peak and above the cruising noise; ExitAt above the noise floor but
@@ -525,10 +683,15 @@ class RealtimeGuard:
         span = max(1, peak - floor)
         new_enter = peak - max(8, int(0.25 * span))
         new_enter = max(new_enter, floor + 12)
-        if new_enter >= peak:
-            new_enter = peak - 5
+        if prior_rise:
+            # never chase a weak peak into the pilot's noise band: keep EnterAt
+            # in the upper half of their typical crossing rise. If the missed
+            # peak itself sits below that band, leave the calibration alone —
+            # the guard keeps filling such passes lap-by-lap instead.
+            new_enter = max(new_enter, floor + int(TUNE_CAP_FRACTION * prior_rise))
         changed = []
-        if new_enter > floor and new_enter < (node.enter_at_level or 999):
+        if new_enter < peak and new_enter > floor \
+                and new_enter < (node.enter_at_level or 999):
             ctx.calibration.set_enter_at_level(node.index, new_enter)
             changed.append('EnterAt {}'.format(new_enter))
         enter_now = node.enter_at_level or new_enter
@@ -699,12 +862,18 @@ class RealtimeGuard:
 
         delta = 0
         for d in mine:
-            near = any(abs(s - d['t_ms']) <= LAP_MATCH_SECS * 1000
-                       for s in stamps)
-            if d['outcome'] == 'added' and not near:
-                delta += 1      # false positive: our pass was removed
-            elif d['outcome'] == 'skipped' and near:
-                delta -= 1      # false negative: operator added a lap there
+            if d['outcome'] == 'added':
+                # tight window: a phantom holeshot ~1.8 s before the real one
+                # must not pass for "kept" just because the real lap is close
+                near = any(abs(s - d['t_ms']) <= ADD_MATCH_SECS * 1000
+                           for s in stamps)
+                if not near:
+                    delta += 1  # false positive: our pass was removed
+            elif d['outcome'] == 'skipped':
+                near = any(abs(s - d['t_ms']) <= LAP_MATCH_SECS * 1000
+                           for s in stamps)
+                if near:
+                    delta -= 1  # false negative: operator added a lap there
         if not delta:
             return
 

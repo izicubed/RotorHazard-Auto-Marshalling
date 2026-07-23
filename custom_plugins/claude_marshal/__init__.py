@@ -13,7 +13,7 @@ offering cancel and manual race / per-pilot runs.
 from eventmanager import Evt
 from .marshal_ai import (
     MarshalController, EV_GET_STATE, EV_CANCEL, EV_RUN_RACE, EV_RUN_PILOT,
-    EV_APPLY, EV_CONTEXT,
+    EV_APPLY, EV_CONTEXT, EV_SET_ENABLED,
 )
 from .realtime_guard import RealtimeGuard, EV_RT_GET
 
@@ -32,6 +32,8 @@ def initialize(rhapi):
     rhapi.ui.socket_listen(EV_RUN_PILOT, controller.on_run_pilot)
     rhapi.ui.socket_listen(EV_APPLY, controller.on_apply)
     rhapi.ui.socket_listen(EV_CONTEXT, controller.on_context)
+    # panel Enabled/Disabled toggle (master switch: auto flow + realtime guard)
+    rhapi.ui.socket_listen(EV_SET_ENABLED, controller.on_set_enabled)
 
     # Real-time (fully local, no AI calls) in-race marshalling guard:
     # catches missed passes (holeshot) and re-tunes EnterAt/ExitAt live.
