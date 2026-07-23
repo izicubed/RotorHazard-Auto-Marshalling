@@ -10,6 +10,8 @@
 	if (typeof io === 'undefined') { return; }
 
 	var socket = null, state = {}, lastElapsed = 0, lastTs = 0, running = false, ticker = null;
+	var rtState = {}, rtSeenCount = 0;   // real-time guard feed (in-panel)
+	function rtEvents() { return rtState.events || []; }
 
 	// ------------------------------------------------------------------ theme
 	// 'dark' (default), 'light', or 'auto' (follow the browser/OS preference).
@@ -29,8 +31,6 @@
 	function applyThemeClasses() {
 		var p = document.getElementById('rh-cm');
 		if (p) p.classList.toggle('rh-cm-light', isLight());
-		var rt = document.getElementById('rh-cm-rt');
-		if (rt) rt.classList.toggle('rh-cm-light', isLight());
 	}
 
 	function ensureCss() {
@@ -124,6 +124,8 @@
 		if (!collapsible()) { return true; }
 		var phase = state.phase || 'idle';
 		if (phase === 'waiting_countdown' || phase === 'running') { return true; }
+		// live corrections during a race: keep the feed in view
+		if (rtState.active && rtEvents().length) { return true; }
 		if (userOpen !== null) { return userOpen; }
 		return autoOpen;
 	}
@@ -141,6 +143,9 @@
 			'<div class="rh-cm-ctl"></div>' +
 			'<div class="rh-cm-track"><div class="rh-cm-bar"></div></div>' +
 			'<div class="rh-cm-rows"></div>' +
+			'<div class="rh-cm-rtwrap rh-cm-hidden">' +
+			'<div class="rh-cm-rt-title"><span class="rh-cm-spark">⚡</span> Real-time corrections</div>' +
+			'<div class="rh-cm-rt-list"></div></div>' +
 			'<div class="rh-cm-foot"></div>';
 		panel.querySelector('.rh-cm-head').addEventListener('click', function (e) {
 			if (e.target.closest('button, input')) { return; }
@@ -235,12 +240,19 @@
 		ensurePanel();
 		applyThemeClasses();
 		renderToggle();
+		var evs = rtEvents();
+		// a new real-time correction arriving expands the panel this session
+		if (evs.length > rtSeenCount) { autoOpen = true; userOpen = null; }
+		rtSeenCount = evs.length;
 		// With nothing to show, keep a minimal slim bar so the operator always
 		// has the Enabled/Disabled switch at hand: on /run when the state
 		// belongs to a marshal-page action (only the auto flow is relevant
-		// there), and anywhere while idle with no heat context yet.
-		var minimal = (isRun && state.origin !== 'auto') ||
-			(phase === 'idle' && !(state.pilots && state.pilots.length));
+		// there), and anywhere while idle with no heat context yet. While the
+		// in-race guard is watching, a small chip says so; once it makes a
+		// correction the feed shows inside this panel, so drop out of minimal.
+		var minimal = ((isRun && state.origin !== 'auto') ||
+			(phase === 'idle' && !(state.pilots && state.pilots.length))) &&
+			!evs.length;
 		panel.classList.remove('rh-cm-hidden');
 		if (minimal) {
 			panel.className = 'rh-cm rh-cm-collapsed rh-cm-min' +
@@ -248,10 +260,12 @@
 			renderToggle();
 			q('.rh-cm-headsum').innerHTML = (state.enabled === false)
 				? '<span class="rh-cm-headmut">automatic marshalling is off</span>' : '';
-			q('.rh-cm-mode').innerHTML = '';
+			q('.rh-cm-mode').innerHTML = rtState.active
+				? chip('watching', 'rh-cm-c-info') : '';
 			q('.rh-cm-sub').textContent = '';
 			q('.rh-cm-ctl').innerHTML = '';
 			q('.rh-cm-rows').innerHTML = '';
+			q('.rh-cm-rtwrap').classList.add('rh-cm-hidden');
 			q('.rh-cm-foot').textContent = '';
 			q('.rh-cm-timer').textContent = '';
 			q('.rh-cm-bar').style.width = '0';
@@ -263,7 +277,8 @@
 		// finished with values to review, or an error); reset when it is gone
 		var key = openKey();
 		if (key && key !== lastOpenKey) { autoOpen = true; userOpen = null; }
-		if (!key && phase !== 'waiting_countdown' && phase !== 'running') { autoOpen = false; }
+		if (!key && phase !== 'waiting_countdown' && phase !== 'running' &&
+			!evs.length) { autoOpen = false; }
 		lastOpenKey = key;
 
 		var open = isOpen();
@@ -273,8 +288,11 @@
 			(isLight() ? ' rh-cm-light' : '');
 		q('.rh-cm-chev').textContent = open ? '▾' : '▸';
 
-		q('.rh-cm-mode').innerHTML = (phase === 'complete' && state.can_apply)
-			? chip('review', 'rh-cm-c-warn') : (phase === 'applied' ? chip('applied', 'rh-cm-c-ok') : '');
+		q('.rh-cm-mode').innerHTML =
+			(rtState.active ? chip('watching', 'rh-cm-c-info') : '') +
+			((phase === 'complete' && state.can_apply)
+				? chip('review', 'rh-cm-c-warn')
+				: (phase === 'applied' ? chip('applied', 'rh-cm-c-ok') : ''));
 
 		var bits = [];
 		if (state.heat) { bits.push(state.heat); }
@@ -287,10 +305,26 @@
 		if (!open) {
 			if (phase === 'error') {
 				sum.innerHTML = chip('error', 'rh-cm-c-warn');
+			} else if (evs.length) {
+				sum.innerHTML = '<span class="rh-cm-headmut">' + evs.length +
+					' correction' + (evs.length === 1 ? '' : 's') + '</span>';
 			} else if (bits.length) {
 				sum.innerHTML = '<span class="rh-cm-headmut">' + bits.slice(0, 2).join(' · ') + '</span>';
 			}
 		}
+
+		// real-time corrections feed (inside this panel)
+		q('.rh-cm-rtwrap').classList.toggle('rh-cm-hidden', !evs.length);
+		q('.rh-cm-rt-list').innerHTML = evs.map(function (e) {
+			var lab = RT_LABELS[e.action] || [e.action, 'rh-cm-c-info'];
+			return '<div class="rh-cm-rt-row">' +
+				'<span class="rh-cm-seat">S' + ((e.seat | 0) + 1) + '</span>' +
+				'<span class="rh-cm-name">' + (e.callsign || 'Seat') + '</span>' +
+				chip(lab[0], lab[1]) +
+				'<span class="rh-cm-rt-detail">' + (e.detail || '') + '</span>' +
+				'<span class="rh-cm-rt-time">@ ' + fmtRaceTime(e.t_ms || 0) + '</span>' +
+				'</div>';
+		}).join('');
 
 		// controls
 		var ctl = q('.rh-cm-ctl'); ctl.innerHTML = '';
@@ -423,50 +457,9 @@
 	}
 
 	// ---- Real-time marshalling feed (local in-race corrections) -------------
-	// A single-line bar while there are no corrections (the summary lives in
-	// the header). With corrections it is expanded during the race and
-	// auto-expands when a new one arrives; expanding by hand is session-only.
-	var rtBox, rtUserOpen = null, rtAutoOpen = false, rtSeenCount = 0;
-	function rtIsOpen() {
-		if (rtUserOpen !== null) { return rtUserOpen; }
-		return rtAutoOpen;
-	}
-	function ensureRtBox() {
-		if (!rtBox) {
-			rtBox = el('div', 'rh-cm rh-cm-rt'); rtBox.id = 'rh-cm-rt';
-			rtBox.innerHTML =
-				'<div class="rh-cm-head"><span class="rh-cm-chev">▸</span>' +
-				'<div class="rh-cm-title">' +
-				'<span class="rh-cm-spark">⚡</span> Real-time Marshalling</div>' +
-				'<div class="rh-cm-headsum"></div>' +
-				'<div class="rh-cm-rt-live"></div></div>' +
-				'<div class="rh-cm-rt-list"></div>';
-			rtBox.querySelector('.rh-cm-head').addEventListener('click', function (e) {
-				if (e.target.closest('button, input')) { return; }
-				var last = renderRt._last || {};
-				if (!(last.events || []).length) { return; }   // nothing to expand
-				if (last.active) { return; }                   // forced open during the race
-				rtUserOpen = !rtIsOpen(); rtAutoOpen = false;
-				renderRt(last);
-			});
-		}
-		var anchor = document.getElementById('race-graph');    // Marshal: above graph
-		if (anchor && anchor.parentNode) {
-			if (rtBox.parentNode !== anchor.parentNode) {
-				anchor.parentNode.insertBefore(rtBox, anchor);
-			}
-			return rtBox;
-		}
-		var d = dock();                                        // Run: plugin dock above the pilot table
-		if (d) {
-			if (rtBox.parentNode !== d) { d.appendChild(rtBox); }
-			return rtBox;
-		}
-		if (!rtBox.parentNode && document.body) {
-			document.body.insertBefore(rtBox, document.body.firstChild);
-		}
-		return rtBox;
-	}
+	// Lives INSIDE the Auto Marshalling panel: while a race runs the header
+	// shows a small "watching" chip; the first correction expands the panel
+	// and the feed renders below the pilot cells.
 	function fmtRaceTime(ms) {
 		var s = Math.floor(ms / 1000);
 		return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2) +
@@ -478,57 +471,6 @@
 		pass_inserted: ['pass inserted', 'rh-cm-c-ok'],
 		stuck: ['stuck crossing fixed', 'rh-cm-c-warn']
 	};
-	function renderRt(s) {
-		s = s || {};
-		renderRt._last = s;
-		noteTheme(s);
-		var events = s.events || [];
-		if (!events.length && !s.active) {
-			if (rtBox && rtBox.parentNode) { rtBox.classList.add('rh-cm-hidden'); }
-			rtAutoOpen = false; rtSeenCount = 0;
-			return;
-		}
-		ensureRtBox();
-
-		// a new correction arriving expands the feed for this page session
-		if (events.length > rtSeenCount) { rtAutoOpen = true; rtUserOpen = null; }
-		rtSeenCount = events.length;
-
-		// no corrections → nothing to expand: a single-line bar with the
-		// summary in the header; with corrections the feed is forced open
-		// while the race runs (watching) and toggleable otherwise
-		var empty = !events.length;
-		var open = !empty && (s.active ? true : rtIsOpen());
-		rtBox.classList.remove('rh-cm-hidden');
-		rtBox.classList.toggle('rh-cm-collapsed', !open);
-		rtBox.classList.toggle('rh-cm-empty', empty);
-		rtBox.classList.toggle('rh-cm-light', isLight());
-		rtBox.querySelector('.rh-cm-chev').textContent = open ? '▾' : '▸';
-		rtBox.querySelector('.rh-cm-rt-live').innerHTML = s.active
-			? '<span class="rh-cm-chip rh-cm-c-info">watching</span>' : '';
-
-		// header summary: correction count without expanding
-		var sum = rtBox.querySelector('.rh-cm-headsum'); sum.innerHTML = '';
-		if (empty) {
-			sum.innerHTML = '<span class="rh-cm-headmut">no corrections</span>';
-		} else if (!open) {
-			sum.innerHTML = '<span class="rh-cm-headmut">' + events.length +
-				' correction' + (events.length === 1 ? '' : 's') + '</span>';
-		}
-
-		var list = rtBox.querySelector('.rh-cm-rt-list');
-		if (empty) { list.innerHTML = ''; return; }
-		list.innerHTML = events.map(function (e) {
-			var lab = RT_LABELS[e.action] || [e.action, 'rh-cm-c-info'];
-			return '<div class="rh-cm-rt-row">' +
-				'<span class="rh-cm-seat">S' + ((e.seat | 0) + 1) + '</span>' +
-				'<span class="rh-cm-name">' + (e.callsign || 'Seat') + '</span>' +
-				chip(lab[0], lab[1]) +
-				'<span class="rh-cm-rt-detail">' + (e.detail || '') + '</span>' +
-				'<span class="rh-cm-rt-time">@ ' + fmtRaceTime(e.t_ms || 0) + '</span>' +
-				'</div>';
-		}).join('');
-	}
 
 	function sendContext() {
 		if (!onMarshalPage() || !socket) { return; }
@@ -556,7 +498,11 @@
 			setTimeout(sendContext, 800);
 		});
 		socket.on('claude_marshal_state', function (s) { render(s); });
-		socket.on('claude_marshal_rt', function (s) { renderRt(s); });
+		socket.on('claude_marshal_rt', function (s) {
+			noteTheme(s);
+			rtState = s || {};
+			render(state);
+		});
 		// In Auto mode follow live OS/browser scheme changes.
 		if (lightMq) {
 			var onScheme = function () { if (theme === 'auto') applyThemeClasses(); };
