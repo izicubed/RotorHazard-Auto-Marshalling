@@ -150,9 +150,10 @@
 #rh-cm-rt.rh-cm-empty .rh-cm-head { border-bottom: none; cursor: default; }
 #rh-cm-rt.rh-cm-empty .rh-cm-chev { display: none; }
 
-/* minimal slim bar (no race context yet): just the title + Auto toggle */
-#rh-cm.rh-cm-min .rh-cm-head { border-bottom: none; cursor: default; }
-#rh-cm.rh-cm-min .rh-cm-chev { display: none; }
+/* minimal (no race context yet): slim bar with the Auto toggle; expandable
+   via the chevron like every panel — expanded it shows a status line */
+#rh-cm.rh-cm-min .rh-cm-track { display: none; }
+#rh-cm.rh-cm-min .rh-cm-foot { border-top: none; }
 
 /* empty sections take no room (e.g. idle panel showing only the feed) */
 #rh-cm .rh-cm-sub:empty, #rh-cm .rh-cm-ctl:empty,
@@ -205,6 +206,8 @@
 #rh-cm .rh-cm-head {
 	display: flex; align-items: center; gap: 6px; padding: 5px 9px;
 	background: var(--cm-head-bg); border-bottom: 1px solid var(--cm-edge);
+	/* same slim-bar height as the gate calibration panel next door */
+	min-height: 18px; box-sizing: content-box;
 }
 #rh-cm .rh-cm-title { font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
 	text-transform: uppercase; flex: 1 1 auto; }

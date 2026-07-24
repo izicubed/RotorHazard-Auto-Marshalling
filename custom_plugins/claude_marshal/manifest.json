@@ -7,7 +7,7 @@
     "documentation_uri": "https://github.com/izicubed/RotorHazard-Claude-Marshal",
     "license": "RotorHazard",
     "license_uri": "https://github.com/RotorHazard/RotorHazard/blob/main/LICENSE",
-    "version": "1.4.2",
+    "version": "1.4.3",
     "required_rhapi_version": "1.0",
     "dependencies": [
         "anthropic>=0.40"

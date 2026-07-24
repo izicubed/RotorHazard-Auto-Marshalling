@@ -255,10 +255,17 @@
 			!evs.length;
 		panel.classList.remove('rh-cm-hidden');
 		if (minimal) {
-			panel.className = 'rh-cm rh-cm-collapsed rh-cm-min' +
+			// no race context yet: a slim bar, expandable by the chevron /
+			// header click like every other panel — expanded it explains the
+			// current mode instead of showing an empty box
+			var mopen = collapsible() ? (userOpen === true) : true;
+			panel.className = 'rh-cm rh-cm-min' +
+				(mopen ? '' : ' rh-cm-collapsed') +
+				(collapsible() ? '' : ' rh-cm-static') +
 				(isLight() ? ' rh-cm-light' : '');
 			renderToggle();
-			q('.rh-cm-headsum').innerHTML = (state.enabled === false)
+			q('.rh-cm-chev').textContent = mopen ? '▾' : '▸';
+			q('.rh-cm-headsum').innerHTML = (!mopen && state.enabled === false)
 				? '<span class="rh-cm-headmut">automatic marshalling is off</span>' : '';
 			q('.rh-cm-mode').innerHTML = rtState.active
 				? chip('watching', 'rh-cm-c-info') : '';
@@ -266,7 +273,12 @@
 			q('.rh-cm-ctl').innerHTML = '';
 			q('.rh-cm-rows').innerHTML = '';
 			q('.rh-cm-rtwrap').classList.add('rh-cm-hidden');
-			q('.rh-cm-foot').textContent = '';
+			q('.rh-cm-foot').textContent = !mopen ? ''
+				: (state.enabled === false
+					? 'Automatic marshalling is OFF — no post-race runs and no in-race corrections until re-enabled.'
+					: (rtState.active
+						? 'Race in progress — watching the live RSSI for missed passes.'
+						: 'Waiting for a race — marshalling runs automatically after each heat is saved.'));
 			q('.rh-cm-timer').textContent = '';
 			q('.rh-cm-bar').style.width = '0';
 			stopTicker();
