@@ -1,9 +1,9 @@
-/* Claude Auto-Marshalling - wide, low-profile inline panels
+/* Auto Marshalling - wide, low-profile inline panels
    (Run: under table, Marshal: above graph). One pilot per compact cell.
    Two colour schemes via CSS variables: dark (default) and light
-   (class .rh-cm-light, applied by claude_marshal.js from the Theme option). */
+   (class .rh-cm-light, applied by auto_marshal.js from the Theme option). */
 
-[id^="ui-custom-claude_marshal_load_"] { display: none !important; }
+[id^="ui-custom-auto_marshal_load_"] { display: none !important; }
 
 /* ------------------------------------------------------------- palettes */
 

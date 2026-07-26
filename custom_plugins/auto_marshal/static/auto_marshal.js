@@ -1,12 +1,12 @@
-/* Claude Auto-Marshalling - inline panel (Run: under pilot table, Marshal: above
- * RSSI graph). Driven by the server `claude_marshal_state` snapshot; requests it
+/* Auto Marshalling - inline panel (Run: under pilot table, Marshal: above
+ * RSSI graph). Driven by the server `auto_marshal_state` snapshot; requests it
  * on every page load so progress survives navigation. Offers cancel during the
  * countdown and manual race / per-pilot runs. */
 (function () {
 	'use strict';
 
-	if (window.__rhClaudeMarshal) { return; }
-	window.__rhClaudeMarshal = true;
+	if (window.__rhAutoMarshal) { return; }
+	window.__rhAutoMarshal = true;
 	if (typeof io === 'undefined') { return; }
 
 	var socket = null, state = {}, lastElapsed = 0, lastTs = 0, running = false, ticker = null;
@@ -37,7 +37,7 @@
 		if (document.getElementById('rh-cm-css')) { return; }
 		var l = document.createElement('link');
 		l.id = 'rh-cm-css'; l.rel = 'stylesheet';
-		l.href = '/claude_marshal/static/claude_marshal.css';
+		l.href = '/auto_marshal/static/auto_marshal.css';
 		(document.head || document.documentElement).appendChild(l);
 	}
 	function el(tag, cls, html) {
@@ -53,8 +53,6 @@
 	// Friendly, non-scary labels for status codes (chip text + tooltip).
 	var LABELS = {
 		BAD_CALIBRATION_UNRESOLVED: ['check manually', 'Automatic thresholds could not be resolved — review on the Marshal graph.'],
-		BAD_CALIBRATION_NO_API: ['no AI available', 'Calibration looks off, but Claude is unavailable (no API key or offline) — review on the Marshal graph.'],
-		AI_RETHRESHOLD_ERROR: ['AI unavailable', 'The Claude re-tune request failed.'],
 		PROTECTED_LAP_UNDER_MIN_LAP: ['short manual lap', 'A manual/API lap is shorter than the Minimum Lap Time; left untouched.'],
 		HIGH_CONFIDENCE_SHORT_FALSE_PASS: ['likely false lap', 'A lap is far faster than this pilot usually flies.'],
 		FAST_VS_HISTORY: ['fast lap', 'Faster than this pilot’s typical lap.'],
@@ -156,7 +154,7 @@
 			render(state);
 		});
 		panel.querySelector('.rh-cm-toggle').addEventListener('click', function () {
-			socket.emit('claude_marshal_set_enabled', { enabled: !state.enabled });
+			socket.emit('auto_marshal_set_enabled', { enabled: !state.enabled });
 		});
 		place();
 		return panel;
@@ -200,7 +198,7 @@
 			var b = el('button', 'rh-cm-ico', '↻');
 			b.title = 'Marshal this pilot';
 			b.addEventListener('click', function () {
-				socket.emit('claude_marshal_run_pilot',
+				socket.emit('auto_marshal_run_pilot',
 					{ race_id: state.race_id, pilotrace_id: p.pilotrace_id });
 			});
 			top.appendChild(b);
@@ -211,9 +209,8 @@
 		if (p.status === 'ok' || p.status === 'warn') {
 			var h = '<span class="rh-cm-laps">' + (p.laps != null ? p.laps : '?') + '</span>' +
 				'<span class="rh-cm-thr">' + p.enter_at + '/' + p.exit_at + '</span>';
-			if (p.changed) { h += chip('AI', 'rh-cm-c-info'); }
+			if (p.changed) { h += chip('re-tuned', 'rh-cm-c-info'); }
 			(p.warnings || []).forEach(function (w) {
-				if (String(w).indexOf('AI_RETHRESHOLD') === 0) { return; }
 				h += chipFor(w, 'rh-cm-c-warn');
 			});
 			bot.innerHTML = h;
@@ -309,7 +306,6 @@
 		var bits = [];
 		if (state.heat) { bits.push(state.heat); }
 		if (state.round) { bits.push('Round ' + state.round); }
-		if (state.model && phase !== 'idle') { bits.push(state.model); }
 		q('.rh-cm-sub').textContent = bits.join('  ·  ');
 
 		// collapsed-header summary: enough context without expanding
@@ -346,25 +342,25 @@
 			num.style.animation = 'none'; void num.offsetWidth; num.style.animation = '';  // restart pulse each tick
 			var wrap = el('div', 'rh-cm-count');
 			wrap.appendChild(num);
-			wrap.appendChild(el('span', 'rh-cm-count-lbl', 'AI marshalling starting…'));
+			wrap.appendChild(el('span', 'rh-cm-count-lbl', 'Auto marshalling starting…'));
 			ctl.appendChild(wrap);
 			var cancel = el('button', 'rh-cm-btn rh-cm-btn-cancel', 'Cancel');
 			cancel.addEventListener('click', function () {
-				socket.emit('claude_marshal_cancel', { race_id: state.race_id });
+				socket.emit('auto_marshal_cancel', { race_id: state.race_id });
 			});
 			ctl.appendChild(cancel);
 		} else if (phase === 'running') {
 			// Allow stopping a run in progress (stops after the current pilot).
 			var stop = el('button', 'rh-cm-btn rh-cm-btn-cancel', 'Stop');
 			stop.addEventListener('click', function () {
-				socket.emit('claude_marshal_cancel', { race_id: state.race_id });
+				socket.emit('auto_marshal_cancel', { race_id: state.race_id });
 			});
 			ctl.appendChild(stop);
 		} else {
 			if (state.can_apply) {
 				var apply = el('button', 'rh-cm-btn rh-cm-btn-apply', '✓ Apply calculated values');
 				apply.addEventListener('click', function () {
-					socket.emit('claude_marshal_apply', { race_id: state.race_id });
+					socket.emit('auto_marshal_apply', { race_id: state.race_id });
 				});
 				ctl.appendChild(apply);
 			}
@@ -375,7 +371,7 @@
 				var run = el('button', 'rh-cm-btn',
 					(state.can_apply ? 'Recalculate' : (state.race_id ? 'Marshal this race' : 'Marshal last saved race')));
 				run.addEventListener('click', function () {
-					socket.emit('claude_marshal_run_race', state.race_id ? { race_id: state.race_id } : {});
+					socket.emit('auto_marshal_run_race', state.race_id ? { race_id: state.race_id } : {});
 				});
 				ctl.appendChild(run);
 			}
@@ -489,7 +485,7 @@
 		var h = document.getElementById('selected_heat');
 		var r = document.getElementById('selected_round');
 		if (h && r && h.value !== '' && r.value !== '') {
-			socket.emit('claude_marshal_context',
+			socket.emit('auto_marshal_context',
 				{ heat_id: parseInt(h.value), round: parseInt(r.value) });
 		}
 	}
@@ -505,12 +501,12 @@
 		ensureCss();
 		socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 		socket.on('connect', function () {
-			socket.emit('claude_marshal_get_state', {});
-			socket.emit('claude_marshal_rt_get', {});
+			socket.emit('auto_marshal_get_state', {});
+			socket.emit('auto_marshal_rt_get', {});
 			setTimeout(sendContext, 800);
 		});
-		socket.on('claude_marshal_state', function (s) { render(s); });
-		socket.on('claude_marshal_rt', function (s) {
+		socket.on('auto_marshal_state', function (s) { render(s); });
+		socket.on('auto_marshal_rt', function (s) {
 			noteTheme(s);
 			rtState = s || {};
 			render(state);

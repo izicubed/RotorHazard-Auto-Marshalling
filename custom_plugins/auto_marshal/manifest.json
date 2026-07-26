@@ -1,0 +1,12 @@
+{
+    "domain": "auto_marshal",
+    "name": "Auto Marshalling",
+    "author": "izicubed",
+    "author_uri": "https://github.com/izicubed",
+    "description": "Two-layer automatic marshalling — fully local and deterministic, no API keys, no internet. (1) Real-time guard: during each race it watches the live RSSI trace on the timer itself, detects gate passes the node missed (peaks below EnterAt, e.g. an unregistered holeshot), injects them at the true timestamp so lap counts are correct immediately, re-tunes EnterAt/ExitAt live, fixes stuck crossings, and learns per-pilot thresholds from saved races and from your manual marshalling. (2) Post-race check: after a race is saved it recomputes each pilot's laps from the stored RSSI trace; when a calibration looks broken it re-tunes thresholds against the pilot's other rounds and history, with a preview-then-Apply workflow, native Marshal-page graph/lap-table integration, and hard Minimum-Lap-Time and self-check safeguards. Panels support dark, light and auto themes.",
+    "documentation_uri": "https://github.com/izicubed/RotorHazard-Auto-Marshalling",
+    "license": "RotorHazard",
+    "license_uri": "https://github.com/RotorHazard/RotorHazard/blob/main/LICENSE",
+    "version": "2.0.0",
+    "required_rhapi_version": "1.0"
+}

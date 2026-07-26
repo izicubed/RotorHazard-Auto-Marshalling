@@ -1,5 +1,5 @@
 '''
-Real-time marshalling guard for the Claude Auto-Marshalling plugin.
+Real-time marshalling guard for the Auto Marshalling plugin.
 
 Runs entirely on the timer (Raspberry Pi) with NO external/AI calls. While a
 race is underway it watches each seat's live RSSI trace (node.history_values /
@@ -45,10 +45,10 @@ OPT_RT_STUCK = 'cm_rt_stuck'
 OPT_RT_MAX_FIX = 'cm_rt_max_fixes'
 OPT_RT_LEARN = 'cm_rt_learn'
 OPT_RT_BIAS = 'cm_rt_bias'              # learned per-pilot sensitivity factors
-RT_LOG_ATTR = 'claude_marshal_rt_log'   # per-race decision log attribute
+RT_LOG_ATTR = 'auto_marshal_rt_log'   # per-race decision log attribute
 
-RT_EVENT = 'claude_marshal_rt'          # server -> browser live feed
-EV_RT_GET = 'claude_marshal_rt_get'     # browser asks for current feed
+RT_EVENT = 'auto_marshal_rt'          # server -> browser live feed
+EV_RT_GET = 'auto_marshal_rt_get'     # browser asks for current feed
 
 POLL_SECS = 0.3
 CONFIRM_SECS = 1.2        # peak must be over for this long before acting
@@ -98,7 +98,7 @@ class RealtimeGuard:
 
     def register_ui(self):
         fields = self._rhapi.fields
-        panel = 'claude_marshal'     # same settings panel as the main plugin
+        panel = 'auto_marshal'     # same settings panel as the main plugin
 
         def opt(name, label, ftype, value, desc, options=None):
             kw = dict(name=name, label=label, field_type=ftype, value=value, desc=desc)
@@ -184,7 +184,7 @@ class RealtimeGuard:
         self._active = True
         self._push()
         gevent.spawn(self._monitor, self._gen)
-        logger.info('claude_marshal realtime guard armed (race start)')
+        logger.info('auto_marshal realtime guard armed (race start)')
 
     def on_race_stop(self, _args=None):
         # operator ended the race; RACE_FINISH (time expired) keeps us running
@@ -262,7 +262,7 @@ class RealtimeGuard:
         try:
             self._apply_feedback(race_id, pilot_id)
         except Exception:
-            logger.exception('claude_marshal rt feedback failed')
+            logger.exception('auto_marshal rt feedback failed')
 
     def on_rt_get(self, _data=None):
         try:
@@ -285,7 +285,7 @@ class RealtimeGuard:
         try:
             self._rhapi.ui.socket_broadcast(RT_EVENT, self._snapshot())
         except Exception:
-            logger.exception('claude_marshal rt broadcast failed')
+            logger.exception('auto_marshal rt broadcast failed')
 
     def _record(self, seat, callsign, action, detail, race_ms):
         self._events.append({
@@ -302,7 +302,7 @@ class RealtimeGuard:
                 try:
                     self._compute_priors(ctx)
                 except Exception:
-                    logger.exception('claude_marshal rt priors failed')
+                    logger.exception('auto_marshal rt priors failed')
             while gen == self._gen and not self._stop:
                 race = ctx.race
                 status = race.race_status
@@ -314,13 +314,13 @@ class RealtimeGuard:
                     try:
                         self._scan_all(ctx, race)
                     except Exception:
-                        logger.exception('claude_marshal rt scan failed')
+                        logger.exception('auto_marshal rt scan failed')
                 gevent.sleep(POLL_SECS)
         finally:
             if gen == self._gen:
                 self._active = False
                 self._push()
-            logger.info('claude_marshal realtime guard stopped')
+            logger.info('auto_marshal realtime guard stopped')
 
     def _scan_all(self, ctx, race):
         import RHUtils
@@ -453,7 +453,7 @@ class RealtimeGuard:
                 prior['lap_med'] = int(_median(lts))
             self._priors[idx] = prior
             if prior:
-                logger.info('claude_marshal rt priors seat %s: %s (min_rise %s)',
+                logger.info('auto_marshal rt priors seat %s: %s (min_rise %s)',
                             idx + 1, prior,
                             self._seat_min_rise(idx, pid,
                                                 self._opt(OPT_RT_SENS, 'normal')))
@@ -652,7 +652,7 @@ class RealtimeGuard:
             added = len(self._active_laps(race, node.index)) > len(laps)
             action = 'holeshot' if holeshot else 'pass'
             if not added:
-                logger.warning('claude_marshal rt: add_lap did not register '
+                logger.warning('auto_marshal rt: add_lap did not register '
                                '(seat %s, ts %.0fms)', node.index + 1, lap_ts_ms)
                 return 'skip'
         else:
@@ -667,9 +667,9 @@ class RealtimeGuard:
         self._log_decision(node.index, opts, lap_ts_ms, peak, floor, 'added')
         detail = 'peak {}{}'.format(peak, tuned)
         self._record(node.index, callsign, action, detail, lap_ts_ms)
-        self._notify('AI Marshal: added missed {} for {} ({})'.format(
+        self._notify('Auto Marshal: added missed {} for {} ({})'.format(
             'holeshot' if holeshot else 'pass', callsign, detail))
-        logger.info('claude_marshal rt: seat %s (%s) missed %s added at %.0fms, %s',
+        logger.info('auto_marshal rt: seat %s (%s) missed %s added at %.0fms, %s',
                     node.index + 1, callsign, action, lap_ts_ms, detail)
         return 'fixed'
 
@@ -730,9 +730,9 @@ class RealtimeGuard:
             if node.enter_at_timestamp else 0
         self._record(node.index, callsign, 'stuck',
                      'ExitAt raised to {}'.format(new_exit), race_ms)
-        self._notify('AI Marshal: stuck crossing on {} — ExitAt raised to {}'.format(
+        self._notify('Auto Marshal: stuck crossing on {} — ExitAt raised to {}'.format(
             callsign, new_exit))
-        logger.info('claude_marshal rt: stuck crossing seat %s fixed (ExitAt %s)',
+        logger.info('auto_marshal rt: stuck crossing seat %s fixed (ExitAt %s)',
                     node.index + 1, new_exit)
 
     def _insert_lap(self, race, node_index, lap_ts_ms, peak, opts):
@@ -765,7 +765,7 @@ class RealtimeGuard:
             else:                                   # 4.3.x fallback
                 self._replace_laps_compat(race, node_index, items)
         except Exception:
-            logger.exception('claude_marshal rt replace_laps failed')
+            logger.exception('auto_marshal rt replace_laps failed')
             return False
         try:
             race.check_win_condition()
@@ -844,7 +844,9 @@ class RealtimeGuard:
         decisions = self._race_log.get(race_id)
         if decisions is None:
             try:  # server restarted since the race: recover from the attribute
-                raw = self._rhapi.db.race_attribute_value(race_id, RT_LOG_ATTR)
+                raw = self._rhapi.db.race_attribute_value(race_id, RT_LOG_ATTR) \
+                    or self._rhapi.db.race_attribute_value(
+                        race_id, 'claude_marshal_rt_log')   # pre-2.0 races
                 decisions = json.loads(raw) if raw else []
             except Exception:
                 decisions = []
@@ -887,10 +889,10 @@ class RealtimeGuard:
         self._save_bias()
         callsign = self._callsign(pilot_id)
         direction = 'less' if new > old else 'more'
-        self._notify('AI Marshal: learned from manual marshalling — {} '
+        self._notify('Auto Marshal: learned from manual marshalling — {} '
                      'sensitive for {} (factor {} → {})'.format(
                          direction, callsign, old, new))
-        logger.info('claude_marshal rt feedback: race %s pilot %s delta %+d, '
+        logger.info('auto_marshal rt feedback: race %s pilot %s delta %+d, '
                     'bias %s -> %s', race_id, pilot_id, delta, old, new)
 
     def _load_bias(self):
@@ -904,7 +906,7 @@ class RealtimeGuard:
         try:
             self._rhapi.db.option_set(OPT_RT_BIAS, json.dumps(self._bias))
         except Exception:
-            logger.exception('claude_marshal rt bias save failed')
+            logger.exception('auto_marshal rt bias save failed')
 
     # ---------------------------------------------------------------- helpers
 

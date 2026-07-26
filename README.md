@@ -1,25 +1,28 @@
-# Claude Auto Marshalling (RotorHazard plugin)
+# Auto Marshalling (RotorHazard plugin)
 
-Marshalling for RotorHazard in two layers:
+Automatic marshalling for RotorHazard in two layers — **fully local and
+deterministic: no API keys, no internet, nothing leaves the timer.**
 
-1. **Real-time marshalling (in-race, fully local — no API key needed).** A
-   deterministic RSSI-analysis guard that runs on the timer itself and fixes
-   the classic *missed holeshot* while the race is still running, so lap
-   counts are correct immediately.
-2. **Post-race AI marshalling (optional).** After a race is saved, each
-   pilot's stored RSSI trace can be re-tuned by the **Claude API**, with a
-   preview → **Apply** workflow. This is the only part that needs an
-   Anthropic API key — without a key (or without internet at the race site)
-   the plugin simply runs on the real-time layer alone.
+1. **Real-time guard (in-race).** A deterministic RSSI-analysis guard that
+   runs on the timer itself and fixes the classic *missed holeshot* while the
+   race is still running, so lap counts are correct immediately.
+2. **Post-race check.** After a race is saved, each pilot's laps are
+   recomputed from the stored RSSI trace; when a calibration looks broken it
+   is re-tuned against the pilot's other rounds, with a preview → **Apply**
+   workflow. Nothing is written until you press Apply.
 
-## Real-time marshalling — the algorithm
+> Looking for the Claude-powered post-race re-tuning this plugin used to
+> ship? It now lives in its own optional add-on:
+> [Claude Marshal AI](https://github.com/izicubed/RotorHazard-Claude-Marshal-AI).
+
+## Real-time guard — the algorithm
 
 The most common timing failure is an unregistered first pass (holeshot): the
 craft flies the gate but **EnterAt** sits above the actual RSSI peak, no
 crossing fires, and every later lap is counted one off. From `RACE_START` to
 `RACE_STOP` the guard polls each seat's live RSSI trace (~3×/s, the same
 peak/nadir history RotorHazard stores for marshalling) and runs a fully
-**deterministic** pipeline — no AI, no network:
+**deterministic** pipeline:
 
 - **Noise floor + prominence.** The race's noise floor is the trace minimum;
   a candidate pass must rise above it by a per-pilot threshold *and* rise
@@ -42,21 +45,19 @@ peak/nadir history RotorHazard stores for marshalling) and runs a fully
   feeds back — deleting an auto-added lap makes detection stricter for that
   pilot, adding a lap where the guard skipped makes it more sensitive.
 
-Every correction is announced (priority message + a **Real-time Marshalling**
-feed on the Run/Marshal pages), capped per pilot per race, and logged.
+Every correction is announced (priority message + a corrections feed in the
+panel), capped per pilot per race, and logged.
 
-## Post-race AI marshalling (optional, needs an API key)
+## Post-race check
 
 - **Auto after save** — on *Save Laps*, a cancellable countdown starts, then
-  each pilot is marshalled automatically. Skipped entirely when no API key is
-  set or the Claude API is unreachable (offline race sites run real-time
-  only; the availability probe takes ~a second).
-- **Hybrid AI** — recomputes with the pilot's stored EnterAt/ExitAt first;
-  only when a calibration looks broken (no crossings, ExitAt below the noise
-  floor, invalid thresholds, or a lap count well off the pilot's other
-  rounds) does it ask Claude for better thresholds. A **manual** run always
-  asks the AI and keeps whichever result is better, so good data is never
-  regressed; manual runs while offline fall back to a local recompute.
+  each pilot's stored trace is recomputed with their stored EnterAt/ExitAt.
+- **Local re-tune** — only when a calibration looks broken (no crossings,
+  ExitAt below the noise floor, invalid thresholds, a pile of sub-Minimum-Lap
+  noise crossings, or a lap count well off the pilot's other rounds) are the
+  thresholds repaired: candidates from the seat's other rounds plus a probe
+  grid over the trace are scored against the pilot's history, and the most
+  plausible wins. Good data is never regressed.
 - **Preview → Apply** — nothing is written until you press **✓ Apply**.
 - **Native integration** — on the Marshal page the plugin fills the
   EnterAt/ExitAt fields, redraws the RSSI graph and fills the lap table.
@@ -79,39 +80,34 @@ Marshal page keep working. Both panels support **dark / light / auto**
 
 - RotorHazard **4.3.1+** (4.4 recommended; version differences are handled
   automatically).
-- **No API key is required** for real-time marshalling — it runs standalone
-  on the timer (Raspberry Pi).
-- Optional: an **Anthropic API key** (`sk-ant-…`) for the post-race AI layer.
-  The `anthropic` Python package is declared as a manifest dependency and is
-  installed automatically by the community plugin manager.
+- Nothing else. No API keys, no internet, no Python dependencies.
 
 ## Install
 
 ### Community Plugins manager (recommended)
 
-Settings → Plugins → find **Claude Auto Marshalling**, install, restart.
+Settings → Plugins → find **Auto Marshalling**, install, restart.
 
 ### Manual
 
-1. Copy `custom_plugins/claude_marshal` into `<rh-data>/plugins/`.
-2. `pip install "anthropic>=0.40"` into the RotorHazard environment
-   (only needed for the post-race AI layer).
-3. Restart the server.
+1. Copy `custom_plugins/auto_marshal` into `<rh-data>/plugins/`.
+2. Restart the server.
 
-## Setup
+### Upgrading from *Claude Auto Marshalling* (≤ 1.4.x)
 
-Everything works out of the box — real-time marshalling is enabled by
-default. Open **Settings → Claude Auto Marshalling** to tune it (scope,
-sensitivity, live threshold re-tune, learning, per-pilot cap, theme) and,
-if you want the post-race AI layer, set your **Claude API key** and model
-(Opus 4.8 / Sonnet 5 / Haiku 4.5).
+This plugin is the successor of **Claude Auto Marshalling** with the Claude
+API layer removed (it moved to the optional
+[Claude Marshal AI](https://github.com/izicubed/RotorHazard-Claude-Marshal-AI)
+add-on). Remove the old `claude_marshal` folder from `<rh-data>/plugins/`
+before installing this one — all settings and the learned per-pilot
+sensitivity factors carry over automatically.
 
 ## Usage
 
 - **During a race** — nothing to do: missed passes are added and announced as
-  they happen; watch the *Real-time Marshalling* feed.
-- **Run page** — save a heat → countdown → auto AI marshalling of that heat →
-  review → **Apply** (or **Stop**). Only when Claude is available.
+  they happen; watch the corrections feed in the panel.
+- **Run page** — save a heat → countdown → automatic check of that heat →
+  review → **Apply** (or **Stop**).
 - **Marshal page** — select a heat, press **Marshal** (whole race) or the
   per-pilot ↻ button; fields, graph and lap table update; **Apply** to save.
   Your manual corrections also train the real-time guard.

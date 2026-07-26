@@ -1,26 +1,26 @@
 '''
-Controller for the Claude Auto-Marshalling plugin.
+Post-race controller for the Auto Marshalling plugin.
 
-Implements the logic from rotorhazard_auto_marshalling_plugin_logic.md (v0.2):
+Fully local, deterministic — no API keys, no internet:
 
   * Trigger on Evt.LAPS_SAVE with a cancellable 5-second countdown before the
     automatic run; re-processing guards; LAPS_RESAVE guard.
   * Per pilot: validate RSSI, recompute laps with the pilot's STORED
     EnterAt/ExitAt, and only when self-check/diagnostics show a bad calibration
-    ask Claude to propose new thresholds and re-run (hybrid). Threshold changes
-    stay in the saved race; live node thresholds are never touched.
+    re-tune thresholds against the seat's other rounds and the trace itself.
+    Threshold changes stay in the saved race; live node thresholds are never
+    touched.
   * Hard Minimum-Lap-Time invariant (cluster resolution by highest peak),
     Minimum-First-Crossing, late-lap rules, protected manual/API laps.
   * Historical baseline (median / MAD) used for warnings only.
   * Per-pilot + per-race self-check, dry-run and safe-mode, blockers/warnings,
     JSON report (logged + broadcast).
-  * A snapshot-driven panel shown on Run (under the pilot table) and Marshal
+  * A snapshot-driven panel shown on Run (in the plugin dock) and Marshal
     (above the RSSI graph), with cancel + manual (race / per-pilot) triggers.
 '''
 
 import json
 import logging
-import math
 from time import monotonic
 
 import gevent
@@ -31,7 +31,7 @@ from RHUI import UIField, UIFieldType, UIFieldSelectOption
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_ID = 'claude_marshal'
+PLUGIN_ID = 'auto_marshal'
 
 # LapSource (mirror Database.LapSource)
 SRC_REALTIME, SRC_MANUAL, SRC_RECALC, SRC_AUTOMATIC, SRC_API = 0, 1, 2, 3, 4
@@ -39,14 +39,13 @@ TIMER_SOURCES = (SRC_REALTIME, SRC_RECALC, SRC_AUTOMATIC)
 PROTECTED_SOURCES = (SRC_MANUAL, SRC_API)
 MARSHAL_RSSI = 0
 
-# Options
+# Options (the historical `cm_` prefix is kept on purpose: settings and the
+# learned per-pilot sensitivity factors survive the upgrade from the plugin's
+# claude_marshal era)
 OPT_ENABLED = 'cm_enabled'
 OPT_DRY_RUN = 'cm_dry_run'
 OPT_SAFE = 'cm_safe_mode'
 OPT_COUNTDOWN = 'cm_countdown'
-OPT_API_KEY = 'cm_api_key'
-OPT_MODEL = 'cm_model'
-OPT_EFFORT = 'cm_effort'
 OPT_STRICT_MIN_LAP = 'cm_strict_min_lap'
 OPT_HISTORY_MIN = 'cm_history_min_laps'
 OPT_DEL_MANUAL = 'cm_allow_delete_manual'
@@ -55,49 +54,20 @@ OPT_REPORT_ATTR = 'cm_report_attr'
 OPT_THEME = 'cm_theme'
 
 # Socket events (server <-> browser)
-STATE_EVENT = 'claude_marshal_state'
-EV_GET_STATE = 'claude_marshal_get_state'
-EV_CANCEL = 'claude_marshal_cancel'
-EV_RUN_RACE = 'claude_marshal_run_race'
-EV_RUN_PILOT = 'claude_marshal_run_pilot'
-EV_APPLY = 'claude_marshal_apply'
-EV_CONTEXT = 'claude_marshal_context'
-EV_SET_ENABLED = 'claude_marshal_set_enabled'
+STATE_EVENT = 'auto_marshal_state'
+EV_GET_STATE = 'auto_marshal_get_state'
+EV_CANCEL = 'auto_marshal_cancel'
+EV_RUN_RACE = 'auto_marshal_run_race'
+EV_RUN_PILOT = 'auto_marshal_run_pilot'
+EV_APPLY = 'auto_marshal_apply'
+EV_CONTEXT = 'auto_marshal_context'
+EV_SET_ENABLED = 'auto_marshal_set_enabled'
 
 # History thresholds (spec §9.5)
 HIST_FAST_WARN = 0.75
 HIST_FAST_BLOCK = 0.55
 HIST_SLOW_WARN = 1.75
 HIST_Z_WARN = 3.0
-
-_METHODOLOGY = (
-    "You re-tune a RotorHazard timing gate for one pilot from a saved RSSI "
-    "trace, because the stored EnterAt/ExitAt produced an implausible lap "
-    "count. A pass is recorded when RSSI rises above EnterAt (crossing begins) "
-    "and later falls below ExitAt (crossing ends).\n"
-    "Rules:\n"
-    "  * EnterAt MUST be greater than ExitAt.\n"
-    "  * EnterAt: below the peak of EVERY real gate crossing, and above any "
-    "peak when the craft is NOT at the gate (noise / approach ripples) — an "
-    "empty band between the ripple ceiling and the lowest true crossing peak "
-    "is ideal.\n"
-    "  * ExitAt: below the valleys during a crossing but above the noise floor, "
-    "so the craft returns to Clear between passes and one pass is not split.\n"
-    "Real crossings are spaced ~one lap-time apart and peak well above the "
-    "noise floor; bumps within ~2 s of a real crossing are the same pass. "
-    "Prefer values consistent with the other rounds of this pilot/gate."
-)
-
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "enter_at": {"type": "integer"},
-        "exit_at": {"type": "integer"},
-        "reasoning": {"type": "string"},
-    },
-    "required": ["enter_at", "exit_at", "reasoning"],
-    "additionalProperties": False,
-}
 
 
 class MarshalController:
@@ -117,7 +87,7 @@ class MarshalController:
 
     def register_blueprint(self):
         bp = Blueprint(PLUGIN_ID, __name__, static_folder='static',
-                       static_url_path='/claude_marshal/static')
+                       static_url_path='/auto_marshal/static')
         self._rhapi.ui.blueprint_add(bp)
 
     def on_startup(self, _args=None):
@@ -126,7 +96,7 @@ class MarshalController:
     def _register_ui(self):
         ui = self._rhapi.ui
         fields = self._rhapi.fields
-        ui.register_panel(PLUGIN_ID, 'Claude Auto Marshalling', 'settings', order=0)
+        ui.register_panel(PLUGIN_ID, 'Auto Marshalling', 'settings', order=0)
 
         def opt(name, label, ftype, value, desc, options=None):
             kw = dict(name=name, label=label, field_type=ftype, value=value, desc=desc)
@@ -149,18 +119,6 @@ class MarshalController:
         opt(OPT_COUNTDOWN, 'Auto-run countdown (seconds)',
             UIFieldType.BASIC_INT, 5,
             'Cancellable countdown shown before the automatic run starts.')
-        opt(OPT_API_KEY, 'Claude API key', UIFieldType.TEXT, '',
-            'Anthropic API key (sk-ant-...). Used only to re-tune thresholds '
-            'when a calibration looks broken.')
-        opt(OPT_MODEL, 'Model', UIFieldType.SELECT, 'claude-opus-4-8',
-            'Which Claude model re-tunes thresholds.', options=[
-                UIFieldSelectOption('claude-opus-4-8', 'Claude Opus 4.8 (most capable)'),
-                UIFieldSelectOption('claude-sonnet-5', 'Claude Sonnet 5 (faster/cheaper)'),
-                UIFieldSelectOption('claude-haiku-4-5', 'Claude Haiku 4.5 (fastest)')])
-        opt(OPT_EFFORT, 'Reasoning effort', UIFieldType.SELECT, 'medium',
-            'How long Claude thinks when re-tuning.', options=[
-                UIFieldSelectOption('low', 'Low'), UIFieldSelectOption('medium', 'Medium'),
-                UIFieldSelectOption('high', 'High')])
         opt(OPT_STRICT_MIN_LAP, 'Strict Minimum Lap Time',
             UIFieldType.CHECKBOX, True,
             'Guarantee no active lap is shorter than the Minimum Lap Time.')
@@ -187,15 +145,15 @@ class MarshalController:
 
     def _register_loader(self, ui):
         # Inject the panel front-end only on the pages the spec calls for:
-        # Run (under the pilot table) and Marshal (above the RSSI graph).
+        # Run (in the plugin dock) and Marshal (above the RSSI graph).
         fields = self._rhapi.fields
-        loader = '<script src="/claude_marshal/static/claude_marshal.js"></script>'
+        loader = '<script src="/auto_marshal/static/auto_marshal.js"></script>'
         for page in ('run', 'marshal'):
-            panel = 'claude_marshal_load_' + page
-            ui.register_panel(panel, 'Claude Auto Marshalling', page, order=0)
-            ui.register_markdown(panel, 'claude_marshal_boot_' + page, loader)
+            panel = 'auto_marshal_load_' + page
+            ui.register_panel(panel, 'Auto Marshalling', page, order=0)
+            ui.register_markdown(panel, 'auto_marshal_boot_' + page, loader)
             fields.register_option(UIField(
-                name='_claude_marshal_boot_' + page, label='', value='',
+                name='_auto_marshal_boot_' + page, label='', value='',
                 field_type=UIFieldType.TEXT, private=True, desc=loader), panel)
 
     # -------------------------------------------------------------- option io
@@ -245,7 +203,7 @@ class MarshalController:
         try:
             self._rhapi.ui.socket_broadcast(STATE_EVENT, self._state)
         except Exception:
-            logger.exception('claude_marshal state broadcast failed')
+            logger.exception('auto_marshal state broadcast failed')
 
     def on_get_state(self, _data=None):
         self._state['theme'] = self._opt(OPT_THEME, 'dark')
@@ -253,7 +211,7 @@ class MarshalController:
         try:
             self._rhapi.ui.socket_send(STATE_EVENT, self._state)
         except Exception:
-            logger.exception('claude_marshal state send failed')
+            logger.exception('auto_marshal state send failed')
 
     def on_set_enabled(self, data):
         '''Panel Enabled/Disabled toggle: master switch for all automatic
@@ -265,12 +223,12 @@ class MarshalController:
         try:
             self._rhapi.db.option_set(OPT_ENABLED, '1' if val else '0')
         except Exception:
-            logger.exception('claude_marshal enable toggle failed')
+            logger.exception('auto_marshal enable toggle failed')
             return
         self._notify('Auto Marshalling {}'.format(
             'enabled' if val else 'disabled — no automatic runs or in-race '
             'corrections until re-enabled'))
-        logger.info('claude_marshal %s via panel toggle',
+        logger.info('auto_marshal %s via panel toggle',
                     'enabled' if val else 'disabled')
         self._push()
 
@@ -297,13 +255,6 @@ class MarshalController:
 
     def on_laps_save(self, args):
         if not self._opt_bool(OPT_ENABLED, True):
-            return
-        # No Claude available (no API key): the fully local real-time guard is
-        # the marshalling story — skip the post-race AI flow entirely instead
-        # of running it just to raise "add API key" blockers.
-        if not self._opt(OPT_API_KEY):
-            logger.info('claude_marshal: no API key — post-race AI marshalling '
-                        'skipped (real-time guard remains active)')
             return
         race_id = (args or {}).get('race_id')
         if race_id is None:
@@ -346,8 +297,7 @@ class MarshalController:
             return
         if race_id in self._processing_races:
             return
-        # A manual click explicitly asks for the AI to run for every pilot.
-        gevent.spawn(self._run_race_job, race_id, 'manual', None, True)
+        gevent.spawn(self._run_race_job, race_id, 'manual')
 
     def on_run_pilot(self, data):
         data = data or {}
@@ -357,7 +307,7 @@ class MarshalController:
             return
         if pilotrace_id in self._processing_pilots or race_id in self._processing_races:
             return
-        gevent.spawn(self._run_race_job, race_id, 'manual', pilotrace_id, True)
+        gevent.spawn(self._run_race_job, race_id, 'manual', pilotrace_id)
 
     def on_context(self, data):
         '''Marshal page asks which race it is viewing so the panel can list its
@@ -380,34 +330,7 @@ class MarshalController:
 
     # ------------------------------------------------------------- countdown
 
-    def _claude_reachable(self, timeout=3.0):
-        '''Quick TCP probe: is the Claude API reachable right now? Keeps an
-        offline race-site timer on the real-time guard alone instead of
-        running an AI flow that can only fail. IPv4 is forced — under
-        gevent's resolver an IPv6-first connect can stall on hosts with a
-        broken v6 route even though the network is fine.'''
-        import socket as pysock
-        try:
-            infos = pysock.getaddrinfo('api.anthropic.com', 443,
-                                       pysock.AF_INET, pysock.SOCK_STREAM)
-            s = pysock.socket(pysock.AF_INET, pysock.SOCK_STREAM)
-            s.settimeout(timeout)
-            try:
-                s.connect(infos[0][4])
-            finally:
-                s.close()
-            return True
-        except Exception:
-            return False
-
     def _countdown_then_run(self, race_id):
-        # No internet: real-time marshalling is the whole story — skip the
-        # post-race AI flow silently (mirrors the no-API-key behavior).
-        if not self._claude_reachable():
-            logger.info('claude_marshal: Claude API unreachable (offline?) — '
-                        'post-race AI marshalling skipped (real-time guard '
-                        'remains active)')
-            return
         seconds = max(0, self._opt_int(OPT_COUNTDOWN, 5))
         self._pending[race_id] = {'cancelled': False}
         meta = self._safe(lambda: self._rhdata.get_savedRaceMeta(race_id))
@@ -426,9 +349,9 @@ class MarshalController:
                 self._state = {'phase': 'cancelled', 'race_id': race_id,
                                'heat': heat_name, 'round': rnd, 'pilots': [],
                                'origin': 'auto',
-                               'message': 'AI marshalling cancelled (CANCELLED_BY_USER)'}
+                               'message': 'Marshalling cancelled (CANCELLED_BY_USER)'}
                 self._push()
-                logger.info('claude_marshal race %s CANCELLED_BY_USER', race_id)
+                logger.info('auto_marshal race %s CANCELLED_BY_USER', race_id)
                 return
         finally:
             self._pending.pop(race_id, None)
@@ -436,7 +359,7 @@ class MarshalController:
 
     # --------------------------------------------------------------- pipeline
 
-    def _run_race_job(self, race_id, source, only_pilotrace=None, force_ai=False):
+    def _run_race_job(self, race_id, source, only_pilotrace=None):
         self._processing_races.add(race_id)
         self._cancel_races.discard(race_id)
         if only_pilotrace is not None:
@@ -470,8 +393,7 @@ class MarshalController:
 
             self._state = {
                 'phase': 'running', 'race_id': race_id, 'heat': heat_name,
-                'round': rnd, 'model': self._opt(OPT_MODEL, 'claude-opus-4-8'),
-                'origin': origin, 'cancellable': True,
+                'round': rnd, 'origin': origin, 'cancellable': True,
                 'mode': mode, 'total': len(runs), 'done': 0, 'elapsed': 0.0,
                 'pilots': [{'seat': r.node_index, 'pilotrace_id': r.id,
                             'callsign': self._callsign(r.pilot_id), 'status': 'wait',
@@ -481,15 +403,6 @@ class MarshalController:
 
             reports = []
             cancelled = False
-            client = self._make_client()
-            if client is not None and not self._claude_reachable():
-                # Manual run while offline: recompute locally right away
-                # instead of timing out against the API for every pilot.
-                client = None
-                logger.warning('claude_marshal: Claude API unreachable — '
-                               'marshalling locally without AI')
-                self._notify('Claude unreachable — marshalling locally '
-                             'without AI')
             for r in runs:
                 if race_id in self._cancel_races:   # user pressed Stop
                     cancelled = True
@@ -499,13 +412,9 @@ class MarshalController:
                     entry['status'] = 'run'
                 self._push()
                 pt = monotonic()
-                rep = self._process_pilot(client, r, meta, start_time, fmt, opts,
-                                          siblings, timefmt, force_ai)
+                rep = self._process_pilot(r, meta, start_time, fmt, opts,
+                                          siblings, timefmt)
                 rep['seconds'] = round(monotonic() - pt, 1)
-                if rep.pop('_ai_offline', False) and client is not None:
-                    client = None   # Claude unreachable: local-only from here on
-                    logger.warning('claude_marshal: Claude unreachable — '
-                                   'continuing without AI for remaining pilots')
                 reports.append(rep)
                 if entry:
                     entry.update(status=('err' if rep['blockers'] else
@@ -525,7 +434,7 @@ class MarshalController:
                 self._state['can_apply'] = False
                 self._state['message'] = 'Marshalling stopped'
                 self._push()
-                logger.info('claude_marshal race %s stopped by user', race_id)
+                logger.info('auto_marshal race %s stopped by user', race_id)
                 return
 
             # Compute-and-preview: never write during the run. Buffer the
@@ -546,7 +455,7 @@ class MarshalController:
             self._push()
             self._write_report(meta, reports, phase, False)
         except Exception as ex:
-            logger.exception('claude_marshal run failed')
+            logger.exception('auto_marshal run failed')
             self._state = {'phase': 'error', 'origin': origin, 'pilots': [],
                            'message': str(ex)}
             self._push()
@@ -573,8 +482,8 @@ class MarshalController:
 
     # ----------------------------------------------------------- per pilot
 
-    def _process_pilot(self, client, run, meta, start_time, fmt, opts, siblings,
-                       timefmt, force_ai=False):
+    def _process_pilot(self, run, meta, start_time, fmt, opts, siblings,
+                       timefmt):
         rep = {'pilotrace_id': run.id, 'seat': run.node_index,
                'callsign': self._callsign(run.pilot_id),
                'warnings': [], 'blockers': [], 'changed': False,
@@ -582,7 +491,7 @@ class MarshalController:
                'enter_at': run.enter_at, 'exit_at': run.exit_at}
 
         # 1) validate RSSI history (thresholds are NOT a blocker — invalid stored
-        #    thresholds are exactly what we want the AI to fix)
+        #    thresholds are exactly what the re-tune is for)
         vals, times, verr = self._parse_history(run)
         if verr:
             rep['blockers'].append(verr)
@@ -609,69 +518,21 @@ class MarshalController:
             laps = []
             bad = True
 
-        # 3) Ask Claude to find/verify thresholds. Automatic runs do so only when
-        #    the stored calibration is broken (hybrid); a manual run always asks.
-        #    Whichever of stored/AI is more plausible wins, so good data is never
-        #    regressed and broken/invalid calibrations get repaired.
-        want_ai = force_ai or bad
-        if want_ai and self._opt(OPT_API_KEY):
-            try:
-                ne, nx, reason = self._call_claude(
-                    client, self._opt(OPT_MODEL, 'claude-opus-4-8'),
-                    self._opt(OPT_EFFORT, 'medium'),
-                    self._analyze(vals, times, start_time),
-                    {'frequency': run.frequency, 'stored_enter_at': run.enter_at,
-                     'stored_exit_at': run.exit_at, 'stored_valid': stored_ok,
-                     'expected_laps': expected,
-                     'prior_rounds': siblings.get(run.node_index, {}).get('thresholds')})
-                nlaps = self._finalize(self._recalc(vals, times, start_time, ne, nx),
-                                       run, opts, fmt, timefmt, {'warnings': [], 'blockers': [],
-                                                                 'deleted_count': 0})
-                still_bad = self._calibration_bad(nlaps, baseline, expected, nx, ne,
-                                                  rmin, rmax, sib_thr)
-                rep['reasoning'] = reason
-                changed_thr = (not stored_ok) or ne != enter or nx != exit_at
-                if (not still_bad) and self._better(nlaps, laps, expected) and changed_thr:
-                    laps, enter, exit_at = nlaps, ne, nx
-                    rep['changed'] = True  # calm blue "AI" chip, stays "ok"
-                    rep['deleted_count'] = sum(1 for l in laps if l['deleted'] and l['source'] == SRC_RECALC)
-                elif bad:
-                    # AI could not produce a plausible calibration → leave the
-                    # race untouched for this pilot and flag for manual review.
-                    rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
-                else:
-                    rep['reviewed_ai'] = True  # stored good, AI didn't improve it
-            except Exception as ex:
-                logger.exception('claude re-tune failed for seat %s', run.node_index)
-                rep['warnings'].append('AI_RETHRESHOLD_ERROR')
-                if type(ex).__name__ in ('APIConnectionError', 'APITimeoutError'):
-                    rep['_ai_offline'] = True   # network down: stop trying
-                if bad:
-                    fixed = self._local_retune(vals, times, start_time, run, fmt,
-                                               opts, timefmt, expected, baseline,
-                                               sib_thr, laps)
-                    if fixed:
-                        laps, enter, exit_at = fixed
-                        rep['changed'] = True
-                        rep['reasoning'] = ('Local re-tune (AI unavailable): '
-                                            'thresholds matched against this '
-                                            'seat\'s other rounds.')
-                    else:
-                        rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
-        elif bad:
-            # No AI available: try a fully local re-tune against this seat's
-            # other rounds and the trace itself before giving up. This is what
-            # makes Minimum Lap Time and threshold history count even offline.
+        # 3) broken calibration: local re-tune against this seat's other rounds
+        #    and the trace itself. Whichever of stored/re-tuned is more
+        #    plausible wins, so good data is never regressed and broken/invalid
+        #    calibrations get repaired.
+        if bad:
             fixed = self._local_retune(vals, times, start_time, run, fmt, opts,
                                        timefmt, expected, baseline, sib_thr,
                                        laps)
             if fixed:
                 laps, enter, exit_at = fixed
                 rep['changed'] = True
-                rep['reasoning'] = ('Local re-tune (no AI): thresholds matched '
+                rep['reasoning'] = ('Re-tuned locally: thresholds matched '
                                     'against this seat\'s other rounds.')
             else:
-                rep['blockers'].append('BAD_CALIBRATION_NO_API')
+                rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
 
         rep['enter_at'], rep['exit_at'] = enter, exit_at
 
@@ -888,10 +749,10 @@ class MarshalController:
 
     def _local_retune(self, vals, times, start_time, run, fmt, opts, timefmt,
                       expected, baseline, sib_thr, old_laps):
-        '''AI-free threshold repair: try the EnterAt/ExitAt this seat used in
-        its other rounds plus a probe grid over the trace span; keep the
-        candidate whose recomputed laps look most like this pilot's history
-        (no sub-Minimum-Lap noise, no merged passes, plausible count).
+        '''Deterministic threshold repair: try the EnterAt/ExitAt this seat
+        used in its other rounds plus a probe grid over the trace span; keep
+        the candidate whose recomputed laps look most like this pilot's
+        history (no sub-Minimum-Lap noise, no merged passes, plausible count).
         Returns (laps, enter, exit) or None when nothing plausible is found.'''
         lo, hi = min(vals), max(vals)
         span = hi - lo
@@ -926,7 +787,7 @@ class MarshalController:
         score, e, x, laps = best
         if not self._better(laps, old_laps, expected):
             return None
-        logger.info('claude_marshal local re-tune seat %s: EnterAt %s ExitAt %s '
+        logger.info('auto_marshal local re-tune seat %s: EnterAt %s ExitAt %s '
                     '(score %.1f)', run.node_index + 1, e, x, score)
         return laps, e, x
 
@@ -1036,107 +897,6 @@ class MarshalController:
             d['laps'] = int(round(_median(d['counts']))) if d['counts'] else None
         return out
 
-    # ---------------------------------------------------------------- claude
-
-    def _make_client(self):
-        if not self._opt(OPT_API_KEY):
-            return None
-        try:
-            import anthropic
-            # Bounded timeout / single retry so an offline timer (race site
-            # with no internet) fails fast instead of stalling the whole run.
-            return anthropic.Anthropic(api_key=self._opt(OPT_API_KEY),
-                                       timeout=20.0, max_retries=1)
-        except Exception:
-            logger.exception('anthropic client init failed')
-            return None
-
-    def _call_claude(self, client, model, effort, summary, ctx):
-        if client is None:
-            raise RuntimeError('no Claude client')
-        user = json.dumps({'trace_summary': summary, 'context': ctx}, ensure_ascii=False)
-        prompt = ("The stored thresholds gave an implausible result. Pick better "
-                  "EnterAt and ExitAt (integers), then justify briefly.\n\n" + user)
-
-        def structured(max_tokens, thinking, with_effort):
-            oc = {"format": {"type": "json_schema", "schema": _SCHEMA}}
-            if with_effort:
-                oc["effort"] = effort
-            return client.messages.create(
-                model=model, max_tokens=max_tokens, thinking=thinking,
-                system=_METHODOLOGY, output_config=oc,
-                messages=[{"role": "user", "content": prompt}])
-
-        def plain():
-            return client.messages.create(
-                model=model, max_tokens=1500,
-                system=_METHODOLOGY + '\n\nReply with ONLY a JSON object: '
-                       '{"enter_at": int, "exit_at": int, "reasoning": string}.',
-                messages=[{"role": "user", "content": prompt}])
-
-        last = None
-        for make in (lambda: structured(8000, {"type": "adaptive"}, True),
-                     lambda: structured(4000, {"type": "disabled"}, False),
-                     plain):
-            try:
-                data = self._extract_json(make())
-                enter = int(round(float(data['enter_at'])))
-                exit_at = int(round(float(data['exit_at'])))
-                if exit_at >= enter:
-                    exit_at = enter - 1
-                return enter, exit_at, str(data.get('reasoning', ''))[:400]
-            except Exception as ex:
-                last = ex
-        raise last or ValueError('Claude call failed')
-
-    @staticmethod
-    def _extract_json(resp):
-        import re
-        text = ''.join(b.text for b in resp.content
-                       if getattr(b, 'type', '') == 'text').strip()
-        if text:
-            try:
-                return json.loads(text)
-            except Exception:
-                m = re.search(r'\{.*\}', text, re.S)
-                if m:
-                    return json.loads(m.group(0))
-        raise ValueError('no JSON (stop_reason={})'.format(getattr(resp, 'stop_reason', '?')))
-
-    def _analyze(self, vals, times, start_time):
-        lo, hi = min(vals), max(vals)
-        hist = {}
-        for v in vals:
-            b = (v // 5) * 5
-            hist[b] = hist.get(b, 0) + 1
-
-        def events(enter, exit_):
-            out = []
-            inx = False
-            peak = pt = None
-            for v, t in zip(vals, times):
-                if not inx and v >= enter:
-                    inx, peak, pt = True, v, t
-                elif inx:
-                    if v > peak:
-                        peak, pt = v, t
-                    if v < exit_:
-                        out.append({'t': round(pt - times[0], 1), 'peak': peak})
-                        inx = False
-            if inx:
-                out.append({'t': round(pt - times[0], 1), 'peak': peak})
-            return out
-
-        span = hi - lo
-        probes = sorted({int(lo + span * f) for f in (0.35, 0.5, 0.6, 0.7, 0.8)})
-        return {
-            'samples': len(vals), 'rssi_min': lo, 'rssi_max': hi,
-            'duration_s': round(times[-1] - times[0], 1),
-            'histogram': {'{}-{}'.format(b, b + 4): hist[b] for b in sorted(hist)},
-            'candidate_crossings_by_enter_threshold':
-                {str(e): events(e, max(lo, e - max(5, span // 6))) for e in probes},
-        }
-
     # ------------------------------------------------------------ apply / save
 
     def on_apply(self, data):
@@ -1159,7 +919,7 @@ class MarshalController:
                 self._save_item(meta.id, it)
                 n += 1
             except Exception:
-                logger.exception('claude_marshal apply failed for seat %s',
+                logger.exception('auto_marshal apply failed for seat %s',
                                  it.get('node_index'))
         self._rebuild_caches(pa['race_id'], heat)
         self._processed_races.add(pa['race_id'])
@@ -1168,7 +928,7 @@ class MarshalController:
         self._state['can_apply'] = False
         self._state['applied_count'] = n
         self._push()
-        self._notify('AI marshalling applied to {} pilot(s) (race {})'
+        self._notify('Auto marshalling applied to {} pilot(s) (race {})'
                      .format(n, pa['race_id']))
         try:
             self._rhapi.ui.broadcast_ui('marshal')
@@ -1196,16 +956,16 @@ class MarshalController:
 
     def _write_report(self, meta, reports, phase, saved):
         summary = self._state.get('summary', {})
-        report = {'plugin': 'claude_marshal', 'race_id': meta.id, 'phase': phase,
+        report = {'plugin': 'auto_marshal', 'race_id': meta.id, 'phase': phase,
                   'saved': saved, 'summary': summary,
                   'pilots': [{k: r[k] for k in ('seat', 'callsign', 'enter_at',
                               'exit_at', 'active_laps', 'changed', 'warnings',
                               'blockers') if k in r} for r in reports]}
-        logger.info('claude_marshal report: %s', json.dumps(report, ensure_ascii=False))
+        logger.info('auto_marshal report: %s', json.dumps(report, ensure_ascii=False))
         if self._opt_bool(OPT_REPORT_ATTR, True):
             try:
                 self._rhdata.alter_savedRaceMeta(meta.id, {
-                    'race_attr': 'claude_marshal_report',
+                    'race_attr': 'auto_marshal_report',
                     'value': json.dumps(report, ensure_ascii=False)})
             except Exception:
                 pass  # attribute storage is best-effort / version-sensitive
