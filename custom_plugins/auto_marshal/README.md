@@ -73,10 +73,43 @@ timer's own CPU:
    - preserves manual / API laps;
    - checks the result against the pilot's **historical median** (warnings only);
    - runs a **self-check** before anything can be applied.
-3. Results are a **preview**: nothing is written until **✓ Apply**. **Safe
-   mode** (default on) flags pilots with blockers for manual review instead of
+3. Results are a **preview**: nothing is written until **✓ Apply**, and only
+   pilots whose result actually differs from the saved race are written — a
+   race that is already correct is left byte-for-byte alone. **Safe mode**
+   (default on) flags pilots with blockers for manual review instead of
    touching them.
 4. A JSON **report** is logged (and, best-effort, attached to the race).
+
+A whole-race or per-pilot run started **by hand** searches for better
+thresholds even when the stored calibration looks fine, and then accepts the
+result only if it is strictly better — so the button always does something
+useful without ever trading a good calibration for a cosmetic one.
+
+### Protecting what is already there
+
+The post-race flow is built so that running it on a correctly marshalled race
+changes nothing:
+
+- **Sub-second race start recovered.** RotorHazard saves the race start
+  (`start_time_monotonic`, a float) into an integer column, so up to a full
+  second is lost. Laps recorded live were timestamped against the precise
+  value, so any recompute from the trace — this plugin's and RotorHazard's own
+  Marshal page alike — lands that fraction late. The plugin recovers the lost
+  fraction by matching its crossings against the laps already recorded for the
+  race, so recomputed timestamps line up with the live ones.
+- **Your deletions stick.** A pass deleted on the Marshal page is not brought
+  back to life by a recompute. One physical pass often shows up as a pair of
+  crossings where you kept one and deleted the other, so a deletion is only
+  honoured when there is no kept pass in the same neighbourhood.
+- **Live timings win.** When the thresholds and the passes agree, the stored
+  lap times are kept — the node timed them at full sampling rate, the stored
+  peak/nadir history cannot beat that.
+- **A re-tune never loses a good pass.** A candidate calibration is rejected if
+  it would drop a properly spaced pass that broke no Minimum-Lap-Time rule,
+  even when the other rounds of the heat suggest a lower lap count.
+- **"Did not fly" is not a fault.** A seat whose trace never rises to gate
+  level and that has no recorded lap is reported as such and left untouched,
+  instead of demanding a manual calibration review.
 
 ## Panel
 

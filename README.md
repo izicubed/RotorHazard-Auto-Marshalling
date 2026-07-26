@@ -58,7 +58,12 @@ panel), capped per pilot per race, and logged.
   thresholds repaired: candidates from the seat's other rounds plus a probe
   grid over the trace are scored against the pilot's history, and the most
   plausible wins. Good data is never regressed.
-- **Preview → Apply** — nothing is written until you press **✓ Apply**.
+- **Preview → Apply** — nothing is written until you press **✓ Apply**, and
+  only pilots whose result actually differs are written. A race that is already
+  correct is reported as such and left completely untouched.
+- **Your marshalling is respected** — a pass you deleted on the Marshal page
+  stays deleted, and lap times recorded live are never replaced by
+  recomputed ones when both describe the same passes.
 - **Native integration** — on the Marshal page the plugin fills the
   EnterAt/ExitAt fields, redraws the RSSI graph and fills the lap table.
 - **Safety** — hard Minimum-Lap-Time (highest-peak cluster resolution),

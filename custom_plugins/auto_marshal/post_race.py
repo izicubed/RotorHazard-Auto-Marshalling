@@ -297,7 +297,9 @@ class MarshalController:
             return
         if race_id in self._processing_races:
             return
-        gevent.spawn(self._run_race_job, race_id, 'manual')
+        # A manual click explicitly asks for a re-tune search for every pilot,
+        # not just the ones whose calibration looks broken.
+        gevent.spawn(self._run_race_job, race_id, 'manual', None, True)
 
     def on_run_pilot(self, data):
         data = data or {}
@@ -307,7 +309,7 @@ class MarshalController:
             return
         if pilotrace_id in self._processing_pilots or race_id in self._processing_races:
             return
-        gevent.spawn(self._run_race_job, race_id, 'manual', pilotrace_id)
+        gevent.spawn(self._run_race_job, race_id, 'manual', pilotrace_id, True)
 
     def on_context(self, data):
         '''Marshal page asks which race it is viewing so the panel can list its
@@ -359,7 +361,7 @@ class MarshalController:
 
     # --------------------------------------------------------------- pipeline
 
-    def _run_race_job(self, race_id, source, only_pilotrace=None):
+    def _run_race_job(self, race_id, source, only_pilotrace=None, force=False):
         self._processing_races.add(race_id)
         self._cancel_races.discard(race_id)
         if only_pilotrace is not None:
@@ -371,7 +373,6 @@ class MarshalController:
             meta = self._rhdata.get_savedRaceMeta(race_id)
             if not meta:
                 return
-            start_time = meta.start_time
             heat = self._rhdata.get_heat(meta.heat_id) if meta.heat_id else None
             heat_name, rnd = self._race_labels(meta)
             fmt = self._safe(lambda: self._rhdata.get_raceFormat(meta.format_id))
@@ -386,7 +387,12 @@ class MarshalController:
                 'history_min': self._opt_int(OPT_HISTORY_MIN, 8),
             }
 
-            runs = self._rhdata.get_savedPilotRaces_by_savedRaceMeta(race_id) or []
+            all_runs = self._rhdata.get_savedPilotRaces_by_savedRaceMeta(race_id) or []
+            # RotorHazard saves the race start into an integer column, losing
+            # the sub-second part; recover it so recomputed lap timestamps line
+            # up with the ones recorded live (see _start_offset).
+            start_time = meta.start_time + self._start_offset(meta, all_runs)
+            runs = all_runs
             if only_pilotrace is not None:
                 runs = [r for r in runs if r.id == only_pilotrace]
             siblings = self._sibling_info(meta.heat_id, race_id)
@@ -413,7 +419,7 @@ class MarshalController:
                 self._push()
                 pt = monotonic()
                 rep = self._process_pilot(r, meta, start_time, fmt, opts,
-                                          siblings, timefmt)
+                                          siblings, timefmt, force)
                 rep['seconds'] = round(monotonic() - pt, 1)
                 reports.append(rep)
                 if entry:
@@ -422,7 +428,8 @@ class MarshalController:
                                  enter_at=rep.get('enter_at'), exit_at=rep.get('exit_at'),
                                  laps=rep.get('active_laps'), changed=rep.get('changed'),
                                  warnings=rep['warnings'], blockers=rep['blockers'],
-                                 reasoning=rep.get('reasoning'), seconds=rep['seconds'])
+                                 reasoning=rep.get('reasoning'), seconds=rep['seconds'],
+                                 reviewed=rep.get('reviewed', False))
                 self._state['done'] += 1
                 self._push()
 
@@ -439,12 +446,25 @@ class MarshalController:
 
             # Compute-and-preview: never write during the run. Buffer the
             # non-blocked results so the operator can review, then Apply.
-            applicable = [{'pilotrace_id': r['_run'].id,
-                           'node_index': r['_run'].node_index,
-                           'pilot_id': r['_run'].pilot_id,
-                           'laps': r['_laps'], 'enter_at': r['enter_at'],
-                           'exit_at': r['exit_at']}
-                          for r in reports if r.get('_laps') is not None]
+            # Pilots whose result already matches what is stored are left out:
+            # rewriting them would only churn the saved race (and re-round the
+            # timestamps) without changing anything the operator can see.
+            applicable = []
+            for r in reports:
+                if r.get('_laps') is None:
+                    continue
+                if self._same_as_stored(r['_run'], r['enter_at'], r['exit_at'],
+                                        r['_laps'], opts['min_lap_ms']):
+                    r['unchanged'] = True
+                    entry = self._seat_entry(r['seat'])
+                    if entry:
+                        entry['unchanged'] = True
+                    continue
+                applicable.append({'pilotrace_id': r['_run'].id,
+                                   'node_index': r['_run'].node_index,
+                                   'pilot_id': r['_run'].pilot_id,
+                                   'laps': r['_laps'], 'enter_at': r['enter_at'],
+                                   'exit_at': r['exit_at']})
             self._pending_apply = ({'race_id': race_id, 'items': applicable}
                                    if applicable else None)
             phase = 'complete'
@@ -474,6 +494,7 @@ class MarshalController:
         self._state['can_apply'] = can_apply
         self._state['summary'] = {
             'pilots_total': len(reports), 'pilots_changed': changed,
+            'pilots_unchanged': sum(1 for r in reports if r.get('unchanged')),
             'laps_deleted': deleted,
             'warnings': sum(len(r['warnings']) for r in reports),
             'blockers': sum(len(r['blockers']) for r in reports),
@@ -483,7 +504,7 @@ class MarshalController:
     # ----------------------------------------------------------- per pilot
 
     def _process_pilot(self, run, meta, start_time, fmt, opts, siblings,
-                       timefmt):
+                       timefmt, force=False):
         rep = {'pilotrace_id': run.id, 'seat': run.node_index,
                'callsign': self._callsign(run.pilot_id),
                'warnings': [], 'blockers': [], 'changed': False,
@@ -521,16 +542,32 @@ class MarshalController:
         # 3) broken calibration: local re-tune against this seat's other rounds
         #    and the trace itself. Whichever of stored/re-tuned is more
         #    plausible wins, so good data is never regressed and broken/invalid
-        #    calibrations get repaired.
-        if bad:
+        #    calibrations get repaired. A manual run searches even when the
+        #    stored calibration looks fine, but then only a strictly better
+        #    result is accepted (no cosmetic threshold swaps).
+        if bad or force:
             fixed = self._local_retune(vals, times, start_time, run, fmt, opts,
                                        timefmt, expected, baseline, sib_thr,
-                                       laps)
+                                       laps, strict=not bad)
             if fixed:
                 laps, enter, exit_at = fixed
                 rep['changed'] = True
                 rep['reasoning'] = ('Re-tuned locally: thresholds matched '
                                     'against this seat\'s other rounds.')
+            elif not bad:
+                rep['reviewed'] = True      # searched, stored calibration wins
+            elif self._no_flight(vals, run, laps):
+                # The trace never rises to gate level and nothing was recorded:
+                # this pilot did not fly (DNS / crashed off the line). That is
+                # not a calibration fault — say so instead of demanding review,
+                # and produce nothing so Apply can never touch the seat.
+                rep['warnings'].append('NO_FLIGHT')
+                rep['no_flight'] = True
+            elif laps:
+                # The stored thresholds do reproduce a plausible set of passes;
+                # there are just fewer than this seat's other rounds (a crash or
+                # an early landing). Informational, not a blocker.
+                rep['warnings'].append('FEWER_LAPS_THAN_SIBLINGS')
             else:
                 rep['blockers'].append('BAD_CALIBRATION_UNRESOLVED')
 
@@ -560,11 +597,12 @@ class MarshalController:
         rep['crossings'] = crossings
         rep['active_laps'] = crossings - (1 if has_holeshot else 0)
         rep['holeshot'] = has_holeshot
-        if not rep['blockers']:
-            rep['_laps'] = laps
-        else:
-            # keep original laps untouched on blocker
+        if rep['blockers'] or rep.get('no_flight'):
+            # keep the original laps untouched on a blocker, and never write an
+            # empty lap set for a seat that simply never flew
             rep['_laps'] = None
+        else:
+            rep['_laps'] = laps
         # count deletions we introduced
         rep['deleted_count'] = max(rep['deleted_count'],
                                    sum(1 for l in laps if l['deleted'] and l['source'] == SRC_RECALC))
@@ -573,13 +611,18 @@ class MarshalController:
     # --------------------------------------------------------- lap algorithm
 
     def _recalc(self, vals, times, start_time, enter_at, exit_at):
-        '''RSSI crossing detection; timestamp = midpoint of the peak.'''
+        '''RSSI crossing detection; timestamp = midpoint of the peak.
+
+        Mirrors RotorHazard's own Marshal-page recompute (static/marshal.js),
+        including the strict `rssi > EnterAt` test that opens a crossing — with
+        `>=` a sample sitting exactly on EnterAt starts a crossing the operator
+        does not see on the graph, which adds phantom passes.'''
         laps = []
         crossing = False
         peak = 0
         pf = pl = 0
         for rssi, t in zip(vals, times):
-            if (not crossing) and rssi >= enter_at:
+            if (not crossing) and rssi > enter_at:
                 crossing = True
                 peak, pf, pl = rssi, t, t
                 continue
@@ -612,11 +655,17 @@ class MarshalController:
             if l['lap_time_stamp'] < min_first:
                 l['deleted'] = True
 
+        stored = self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id) or []
+
         # protected manual/API laps
-        for lap in (self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id) or []):
+        for lap in stored:
             if lap.source in PROTECTED_SOURCES:
                 laps.append({'lap_time_stamp': lap.lap_time_stamp, 'source': lap.source,
                              'peak_rssi': lap.peak_rssi, 'deleted': bool(lap.deleted)})
+
+        laps.sort(key=lambda l: l['lap_time_stamp'])
+
+        self._respect_deletions(laps, stored, min_lap)
 
         laps.sort(key=lambda l: l['lap_time_stamp'])
 
@@ -630,6 +679,37 @@ class MarshalController:
         # incremental lap times
         self._update_incremental(laps, timefmt, RHUtils)
         return laps
+
+    def _respect_deletions(self, laps, stored, min_lap):
+        '''Honour the operator's own judgement: a pass they removed on the
+        Marshal page must not come back to life just because we recomputed the
+        trace. Only their deletions are carried over, never their timings, so a
+        re-tune can still move thresholds and find genuinely new passes.
+
+        The catch is that one physical pass often appears as a pair of
+        crossings, of which the operator kept one and deleted the other. Our
+        recompute may produce a single crossing there, landing nearer the
+        deleted twin than the kept one — suppressing it would throw away a real
+        lap. So a deletion is only honoured when there is no kept pass in the
+        same neighbourhood; crossings closer together than the Minimum Lap Time
+        are the same pass by RotorHazard's own definition.'''
+        removed = [l.lap_time_stamp for l in stored
+                   if l.deleted and l.source not in PROTECTED_SOURCES]
+        if not removed:
+            return
+        kept = [l.lap_time_stamp for l in stored
+                if not l.deleted and l.source not in PROTECTED_SOURCES]
+        same_pass = max(2500, (min_lap or 0) // 2)
+        for l in laps:
+            if l['deleted'] or l['source'] != SRC_RECALC:
+                continue
+            ts = l['lap_time_stamp']
+            if not any(abs(ts - r) <= 1500 for r in removed):
+                continue
+            if any(abs(ts - k) <= same_pass for k in kept):
+                continue        # this crossing stands in for a pass they kept
+            l['deleted'] = True
+            l.setdefault('flags', []).append('DELETED_BY_OPERATOR')
 
     def _enforce_min_lap(self, laps, min_lap, opts, rep):
         def protected(l):
@@ -738,17 +818,38 @@ class MarshalController:
             return True
         return False
 
-    def _better(self, new_laps, old_laps, expected):
+    def _better(self, new_laps, old_laps, expected, strict=False):
         na = sum(1 for l in new_laps if not l['deleted'])
         oa = sum(1 for l in old_laps if not l['deleted'])
         if na == 0:
             return False
         if expected:
-            return abs(na - expected) <= abs(oa - expected)
-        return na >= oa
+            return (abs(na - expected) < abs(oa - expected) if strict
+                    else abs(na - expected) <= abs(oa - expected))
+        return na > oa if strict else na >= oa
+
+    def _loses_good_lap(self, old_laps, new_laps, min_lap_ms):
+        '''True when a candidate calibration drops an active pass that looked
+        perfectly legitimate under the stored thresholds (properly spaced, no
+        Minimum-Lap-Time violation). Sibling rounds are only a hint — they must
+        never justify deleting a real pass, e.g. a pilot who flew one lap more
+        than everyone else in the heat.'''
+        old_act = sorted((l for l in old_laps if not l['deleted']),
+                         key=lambda l: l['lap_time_stamp'])
+        new_ts = [l['lap_time_stamp'] for l in new_laps if not l['deleted']]
+        prev = None
+        for l in old_act:
+            ts = l['lap_time_stamp']
+            spaced = prev is None or not min_lap_ms or (ts - prev) >= min_lap_ms
+            prev = ts
+            if not spaced:
+                continue        # this pass was a Minimum-Lap-Time offender
+            if not any(abs(ts - t) <= 1500 for t in new_ts):
+                return True
+        return False
 
     def _local_retune(self, vals, times, start_time, run, fmt, opts, timefmt,
-                      expected, baseline, sib_thr, old_laps):
+                      expected, baseline, sib_thr, old_laps, strict=False):
         '''Deterministic threshold repair: try the EnterAt/ExitAt this seat
         used in its other rounds plus a probe grid over the trace span; keep
         the candidate whose recomputed laps look most like this pilot's
@@ -779,13 +880,15 @@ class MarshalController:
             if self._calibration_bad(laps, baseline, expected, x, e, lo, hi,
                                      sib_thr):
                 continue
+            if self._loses_good_lap(old_laps, laps, opts['min_lap_ms']):
+                continue
             score = self._retune_score(laps, expected, baseline, opts)
             if best is None or score < best[0]:
                 best = (score, e, x, laps)
         if not best:
             return None
         score, e, x, laps = best
-        if not self._better(laps, old_laps, expected):
+        if not self._better(laps, old_laps, expected, strict):
             return None
         logger.info('auto_marshal local re-tune seat %s: EnterAt %s ExitAt %s '
                     '(score %.1f)', run.node_index + 1, e, x, score)
@@ -853,6 +956,89 @@ class MarshalController:
                     break
         # dedupe blockers
         rep['blockers'] = list(dict.fromkeys(rep['blockers']))
+
+    # -------------------------------------------------------- race start time
+
+    def _start_offset(self, meta, runs):
+        '''Recover the sub-second part of the race start time.
+
+        RotorHazard saves `start_time_monotonic` (a float) into an INTEGER
+        column, so up to a full second is lost the moment the race is stored.
+        Laps recorded live were timestamped against the precise value, so any
+        later recompute from the trace — ours and the Marshal page alike —
+        lands that fraction late.
+
+        The lost fraction is still recoverable: recompute the crossings with
+        the truncated start, match them against the laps already recorded for
+        this race, and take the median difference. Every lap of every seat sees
+        the same offset, so a handful of matches pins it down. Returns seconds
+        in [0, 1); 0.0 when there is nothing to match against.'''
+        deltas = []
+        for run in runs:
+            if not run.enter_at or not run.exit_at or run.enter_at <= run.exit_at:
+                continue
+            vals, times, err = self._parse_history(run)
+            if err:
+                continue
+            stamps = [l['lap_time_stamp'] for l in
+                      self._recalc(vals, times, meta.start_time,
+                                   run.enter_at, run.exit_at)]
+            if not stamps:
+                continue
+            for lap in (self._safe(
+                    lambda: self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or []):
+                # hand-entered laps carry the operator's own timing, not the
+                # trace's, so they cannot calibrate the offset
+                if lap.deleted or lap.source in PROTECTED_SOURCES:
+                    continue
+                nearest = min(stamps, key=lambda s: abs(s - lap.lap_time_stamp))
+                d = nearest - lap.lap_time_stamp
+                if 0 <= d < 1000:       # the signature of a truncated start
+                    deltas.append(d)
+        if len(deltas) < 3:
+            return 0.0
+        off = _median(deltas) / 1000.0
+        if not 0.0 <= off < 1.0:
+            return 0.0
+        logger.info('auto_marshal race %s: recovered start-time offset %.3fs '
+                    'from %d recorded laps', meta.id, off, len(deltas))
+        return off
+
+    # ------------------------------------------------------- result vs stored
+
+    def _same_as_stored(self, run, enter, exit_at, laps, min_lap_ms=0):
+        '''True when the computed result holds the same passes the saved race
+        already has, so applying it would only churn the database.
+
+        Timings are compared with a same-pass tolerance rather than exactly.
+        A pass recorded live was timestamped by the node at full sampling rate;
+        recomputing it from the stored peak/nadir history can place it a couple
+        of seconds off, especially where a narrow EnterAt/ExitAt band splits a
+        pass into two crossings. When the thresholds and the passes themselves
+        agree, the live timings are the better record and are left alone.'''
+        if run.enter_at != enter or run.exit_at != exit_at:
+            return False
+        stored = [l for l in (self._safe(
+            lambda: self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or [])
+            if not l.deleted]
+        new = [l for l in laps if not l['deleted']]
+        if len(stored) != len(new):
+            return False
+        tol = max(2500, (min_lap_ms or 0) // 2)
+        a = sorted(l.lap_time_stamp for l in stored)
+        b = sorted(l['lap_time_stamp'] for l in new)
+        return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+    def _no_flight(self, vals, run, laps):
+        '''True when this seat shows no sign of a flight at all: the trace never
+        climbs out of the noise band and nothing was ever recorded. Typically a
+        pilot who did not start, or crashed before the first gate.'''
+        if laps:
+            return False
+        if any(not l.deleted for l in (self._safe(
+                lambda: self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or [])):
+            return False
+        return (max(vals) - min(vals)) < 15
 
     # --------------------------------------------------------------- history
 

@@ -53,6 +53,8 @@
 	// Friendly, non-scary labels for status codes (chip text + tooltip).
 	var LABELS = {
 		BAD_CALIBRATION_UNRESOLVED: ['check manually', 'Automatic thresholds could not be resolved — review on the Marshal graph.'],
+		NO_FLIGHT: ['did not fly', 'The RSSI trace never rises to gate level and no lap was recorded — this pilot did not start, or crashed before the first gate. Nothing to marshal; the seat is left untouched.'],
+		FEWER_LAPS_THAN_SIBLINGS: ['fewer laps', 'The stored calibration reproduces these passes correctly, there are just fewer than in this heat’s other rounds (a crash or an early landing). No calibration fault.'],
 		PROTECTED_LAP_UNDER_MIN_LAP: ['short manual lap', 'A manual/API lap is shorter than the Minimum Lap Time; left untouched.'],
 		HIGH_CONFIDENCE_SHORT_FALSE_PASS: ['likely false lap', 'A lap is far faster than this pilot usually flies.'],
 		FAST_VS_HISTORY: ['fast lap', 'Faster than this pilot’s typical lap.'],
@@ -64,6 +66,8 @@
 		NON_MONOTONIC_HISTORY_TIMES: ['bad RSSI data', 'RSSI timestamps are out of order.'],
 		UNSUPPORTED_MARSHAL_TYPE: ['not RSSI', 'This pilot has no RSSI-history marshal data.']
 	};
+	// Warnings that describe what happened rather than something to fix.
+	var INFO_CODES = { NO_FLIGHT: 1, FEWER_LAPS_THAN_SIBLINGS: 1, INSUFFICIENT_HISTORY: 1 };
 	function label(code) {
 		var key = String(code || '').split(':')[0].split(' ')[0];
 		if (LABELS[key]) { return LABELS[key]; }
@@ -210,8 +214,12 @@
 			var h = '<span class="rh-cm-laps">' + (p.laps != null ? p.laps : '?') + '</span>' +
 				'<span class="rh-cm-thr">' + p.enter_at + '/' + p.exit_at + '</span>';
 			if (p.changed) { h += chip('re-tuned', 'rh-cm-c-info'); }
+			else if (p.reviewed) { h += chip('checked', 'rh-cm-c-ok'); }
+			else if (p.unchanged) { h += chip('unchanged', 'rh-cm-c-ok'); }
 			(p.warnings || []).forEach(function (w) {
-				h += chipFor(w, 'rh-cm-c-warn');
+				// "did not fly" / "fewer laps" are statements of fact, not
+				// problems with the calibration — keep them calm.
+				h += chipFor(w, INFO_CODES[w] ? 'rh-cm-c-info' : 'rh-cm-c-warn');
 			});
 			bot.innerHTML = h;
 		} else if (p.status === 'err') {
@@ -412,11 +420,16 @@
 		}
 		else if (phase === 'complete') {
 			var sm = state.summary || {};
-			foot.textContent = state.can_apply
-				? ('Calculated — review, then press Apply. ' + (sm.pilots_changed || 0) +
-				   ' re-tuned, ' + (sm.warnings || 0) + ' warnings, ' + (sm.blockers || 0) + ' to review · ' +
-				   (state.elapsed != null ? state.elapsed + 's' : ''))
-				: ('Nothing to apply — ' + (sm.blockers || 0) + ' pilot(s) need manual review.');
+			if (state.can_apply) {
+				foot.textContent = 'Calculated — review, then press Apply. ' + (sm.pilots_changed || 0) +
+					' re-tuned, ' + (sm.warnings || 0) + ' warnings, ' + (sm.blockers || 0) + ' to review · ' +
+					(state.elapsed != null ? state.elapsed + 's' : '');
+			} else if (sm.blockers) {
+				foot.textContent = 'Nothing to apply — ' + sm.blockers + ' pilot(s) need manual review.';
+			} else {
+				foot.textContent = 'Checked ' + (sm.pilots_total || 0) + ' pilot(s): the saved race is ' +
+					'already correct, nothing to apply.';
+			}
 		} else if (phase === 'running') { foot.textContent = done + ' / ' + total + ' pilots'; }
 		else { foot.textContent = ''; }
 
