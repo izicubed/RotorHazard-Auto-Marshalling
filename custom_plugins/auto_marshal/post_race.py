@@ -77,6 +77,14 @@ HIST_Z_WARN = 3.0
 # range is reported, and is never proposed by the re-tune.
 MIN_BAND_FRACTION = 0.12
 
+# Two crossings closer together than the Minimum Lap Time are the same pass by
+# RotorHazard's own definition, so every "is this the same pass?" comparison in
+# here uses one window derived from it. Recomputing a pass from the stored
+# peak/nadir history can place it a second or two off where the node timed it
+# live, which is well inside this window and must not read as a different pass.
+def _same_pass_ms(min_lap_ms):
+    return max(2500, (min_lap_ms or 0) // 2)
+
 
 class MarshalController:
     def __init__(self, rhapi):
@@ -602,6 +610,17 @@ class MarshalController:
         # 6) self-check
         self._self_check(laps, enter, exit_at, opts, rep)
 
+        # 6a) Last line of defence: never offer a result that loses a pass the
+        #     saved race already holds and that looks perfectly good. The stored
+        #     peak/nadir history is lossier than the node's live view — with a
+        #     high ExitAt two passes can merge into one crossing in the trace
+        #     while the node, sampling at full rate, recorded both. In that case
+        #     the saved race knows more than we do; say so and touch nothing.
+        if laps and self._loses_good_lap(self._protected_passes(run, []),
+                                         laps, opts['min_lap_ms']):
+            rep['warnings'].append('WOULD_LOSE_STORED_PASS')
+            rep['keep_stored'] = True
+
         # Scored lap count excludes the holeshot (first crossing = lap 0), which
         # RotorHazard does not count unless the format's start behavior is
         # "First lap counts" (StartBehavior.FIRST_LAP == 1).
@@ -611,7 +630,7 @@ class MarshalController:
         rep['crossings'] = crossings
         rep['active_laps'] = crossings - (1 if has_holeshot else 0)
         rep['holeshot'] = has_holeshot
-        if rep['blockers'] or rep.get('no_flight'):
+        if rep['blockers'] or rep.get('no_flight') or rep.get('keep_stored'):
             # keep the original laps untouched on a blocker, and never write an
             # empty lap set for a seat that simply never flew
             rep['_laps'] = None
@@ -713,7 +732,7 @@ class MarshalController:
             return
         kept = [l.lap_time_stamp for l in stored
                 if not l.deleted and l.source not in PROTECTED_SOURCES]
-        same_pass = max(2500, (min_lap or 0) // 2)
+        same_pass = _same_pass_ms(min_lap)
         for l in laps:
             if l['deleted'] or l['source'] != SRC_RECALC:
                 continue
@@ -867,15 +886,36 @@ class MarshalController:
             return True
         return (enter_at - exit_at) >= max(3, int(MIN_BAND_FRACTION * span))
 
+    def _protected_passes(self, run, old_laps):
+        '''The passes a re-tune is not allowed to lose: the ones the stored
+        thresholds still produce, PLUS the ones the saved race already holds.
+
+        The second half matters whenever the stored calibration is the thing at
+        fault. A squeezed EnterAt/ExitAt band records one pass as several, and
+        after Minimum-Lap-Time resolution the recompute can be missing passes
+        the operator does have — so comparing a candidate only against that
+        recompute would let it quietly drop real laps. Guard-injected laps are
+        left out: a correction is not independent evidence of a pass.'''
+        items = [{'lap_time_stamp': l['lap_time_stamp'], 'deleted': l['deleted']}
+                 for l in old_laps]
+        for lap in (self._safe(lambda: self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or []):
+            if lap.deleted or lap.source == SRC_API:
+                continue
+            ts = lap.lap_time_stamp
+            if not any((not it['deleted'])
+                       and abs(it['lap_time_stamp'] - ts) <= 1500 for it in items):
+                items.append({'lap_time_stamp': ts, 'deleted': False})
+        return items
+
     def _loses_good_lap(self, old_laps, new_laps, min_lap_ms):
         '''True when a candidate calibration drops an active pass that looked
-        perfectly legitimate under the stored thresholds (properly spaced, no
-        Minimum-Lap-Time violation). Sibling rounds are only a hint — they must
-        never justify deleting a real pass, e.g. a pilot who flew one lap more
-        than everyone else in the heat.'''
+        perfectly legitimate (properly spaced, no Minimum-Lap-Time violation).
+        Sibling rounds are only a hint — they must never justify deleting a real
+        pass, e.g. a pilot who flew one lap more than everyone else in the heat.'''
         old_act = sorted((l for l in old_laps if not l['deleted']),
                          key=lambda l: l['lap_time_stamp'])
         new_ts = [l['lap_time_stamp'] for l in new_laps if not l['deleted']]
+        tol = _same_pass_ms(min_lap_ms)
         prev = None
         for l in old_act:
             ts = l['lap_time_stamp']
@@ -883,7 +923,7 @@ class MarshalController:
             prev = ts
             if not spaced:
                 continue        # this pass was a Minimum-Lap-Time offender
-            if not any(abs(ts - t) <= 1500 for t in new_ts):
+            if not any(abs(ts - t) <= tol for t in new_ts):
                 return True
         return False
 
@@ -907,6 +947,7 @@ class MarshalController:
             e = int(lo + span * f)
             x = lo + max(3, int(0.25 * (e - lo)))
             cands.append((e, x))
+        protect = self._protected_passes(run, old_laps)
         best = None
         for e, x in dict.fromkeys(cands):
             if not (lo < x < e <= hi):
@@ -924,7 +965,7 @@ class MarshalController:
             if self._calibration_bad(laps, baseline, expected, x, e, lo, hi,
                                      sib_thr):
                 continue
-            if self._loses_good_lap(old_laps, laps, opts['min_lap_ms']):
+            if self._loses_good_lap(protect, laps, opts['min_lap_ms']):
                 continue
             score = self._retune_score(laps, expected, baseline, opts)
             if best is None or score < best[0]:
@@ -1068,7 +1109,7 @@ class MarshalController:
         new = [l for l in laps if not l['deleted']]
         if len(stored) != len(new):
             return False
-        tol = max(2500, (min_lap_ms or 0) // 2)
+        tol = _same_pass_ms(min_lap_ms)
         a = sorted(l.lap_time_stamp for l in stored)
         b = sorted(l['lap_time_stamp'] for l in new)
         return all(abs(x - y) <= tol for x, y in zip(a, b))

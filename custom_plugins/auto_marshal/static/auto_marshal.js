@@ -55,6 +55,7 @@
 		BAD_CALIBRATION_UNRESOLVED: ['check manually', 'Automatic thresholds could not be resolved — review on the Marshal graph.'],
 		NO_FLIGHT: ['did not fly', 'The RSSI trace never rises to gate level and no lap was recorded — this pilot did not start, or crashed before the first gate. Nothing to marshal; the seat is left untouched.'],
 		FEWER_LAPS_THAN_SIBLINGS: ['fewer laps', 'The stored calibration reproduces these passes correctly, there are just fewer than in this heat’s other rounds (a crash or an early landing). No calibration fault.'],
+		WOULD_LOSE_STORED_PASS: ['keeping saved laps', 'Recomputing this pilot from the stored RSSI trace produces fewer passes than the saved race already holds, and the missing one looks perfectly good. The stored trace is a compressed peak/nadir history, so with a high ExitAt two passes can merge into one crossing in it while the node — sampling at full rate during the race — recorded both. The saved race knows more here, so nothing is proposed for this pilot.'],
 		NARROW_THRESHOLD_BAND: ['squeezed band', 'EnterAt and ExitAt sit almost on top of each other. The two are a hysteresis pair — EnterAt starts a pass, ExitAt ends it — so with no gap between them every dip inside a single pass ends the crossing and one pass gets recorded as several, leaving Minimum Lap Time to delete the duplicates. Lower ExitAt to roughly a third of the way up from the noise floor to EnterAt, in Settings → the node calibration.'],
 		PROTECTED_LAP_UNDER_MIN_LAP: ['short manual lap', 'A manual/API lap is shorter than the Minimum Lap Time; left untouched.'],
 		HIGH_CONFIDENCE_SHORT_FALSE_PASS: ['likely false lap', 'A lap is far faster than this pilot usually flies.'],
@@ -68,7 +69,8 @@
 		UNSUPPORTED_MARSHAL_TYPE: ['not RSSI', 'This pilot has no RSSI-history marshal data.']
 	};
 	// Warnings that describe what happened rather than something to fix.
-	var INFO_CODES = { NO_FLIGHT: 1, FEWER_LAPS_THAN_SIBLINGS: 1, INSUFFICIENT_HISTORY: 1 };
+	var INFO_CODES = { NO_FLIGHT: 1, FEWER_LAPS_THAN_SIBLINGS: 1, INSUFFICIENT_HISTORY: 1,
+		WOULD_LOSE_STORED_PASS: 1 };
 	// Warnings about the calibration itself rather than this one result.
 	var SETUP_CODES = { NARROW_THRESHOLD_BAND: 1 };
 	function label(code) {
