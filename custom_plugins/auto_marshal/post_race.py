@@ -387,7 +387,6 @@ class MarshalController:
             timefmt = self._time_format()
             opts = {
                 'min_lap_ms': self._opt_int('MinLapSec', 0) * 1000,
-                'min_lap_behavior': self._opt_int('MinLapBehavior', 0),
                 'min_first_crossing_ms': self._opt_int('MinFirstCrossingSec', 0) * 1000,
                 'strict_min_lap': self._opt_bool(OPT_STRICT_MIN_LAP, True),
                 'del_manual': self._opt_bool(OPT_DEL_MANUAL, False),
@@ -761,7 +760,7 @@ class MarshalController:
             loser.setdefault('flags', []).append('SHORT_LAP_DELETED')
 
     def _apply_late(self, laps, fmt):
-        unlimited = getattr(fmt, 'race_mode', 1) == 1 if fmt else True
+        unlimited = self._unlimited_time(fmt)
         limit_ms = (getattr(fmt, 'race_time_sec', 0) or 0) * 1000 if fmt else 0
         if unlimited or not limit_ms:
             return
@@ -774,6 +773,21 @@ class MarshalController:
                 l.setdefault('flags', []).append('LATE_AFTER_FINISH')
             elif l['lap_time_stamp'] > limit_ms:
                 finished = True
+
+    @staticmethod
+    def _unlimited_time(fmt):
+        '''Does this format run without a time limit?
+
+        RotorHazard 4.4 renamed the field to `unlimited_time` and kept
+        `race_mode` as a property that logs a deprecation warning *with a full
+        stack trace* on every read — enough to bury a race's real log lines.
+        Read the new name first and fall back for 4.3.x.'''
+        if fmt is None:
+            return True
+        val = getattr(fmt, 'unlimited_time', None)
+        if val is None:
+            val = getattr(fmt, 'race_mode', 1)
+        return val == 1
 
     def _update_incremental(self, laps, timefmt, RHUtils):
         laps.sort(key=lambda l: l['lap_time_stamp'])
