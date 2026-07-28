@@ -595,6 +595,17 @@ class MarshalController:
         if stored_ok and not self._band_ok(run.enter_at, run.exit_at, rmin, rmax):
             rep['warnings'].append('NARROW_THRESHOLD_BAND')
 
+        # 3b) Nothing flew past this gate: there is no lap set to check, and the
+        #     remaining diagnostics would only complain about a calibration that
+        #     did not matter this race (the self-check would flag a squeezed band
+        #     on an empty result). Report the fact and stop.
+        if rep.get('no_flight'):
+            rep['crossings'] = 0
+            rep['active_laps'] = 0
+            rep['holeshot'] = False
+            rep['_laps'] = None
+            return rep
+
         # 4) protected-lap min-lap conflict blocker
         if opts['strict_min_lap']:
             for l in laps:
@@ -907,6 +918,23 @@ class MarshalController:
                 items.append({'lap_time_stamp': ts, 'deleted': False})
         return items
 
+    def _reproduces_stored(self, run, laps, min_lap_ms):
+        '''Does this candidate calibration produce exactly the passes the saved
+        race already holds? That is the strongest evidence a calibration is
+        sound — stronger than any comparison against the other rounds of the
+        heat, which only say what the pilot usually manages, not what they did
+        in this one.'''
+        stored = sorted(l.lap_time_stamp for l in (self._safe(
+            lambda: self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or [])
+            if not l.deleted and l.source != SRC_API)
+        if not stored:
+            return False
+        got = sorted(l['lap_time_stamp'] for l in laps if not l['deleted'])
+        if len(got) != len(stored):
+            return False
+        tol = _same_pass_ms(min_lap_ms)
+        return all(abs(a - b) <= tol for a, b in zip(got, stored))
+
     def _loses_good_lap(self, old_laps, new_laps, min_lap_ms):
         '''True when a candidate calibration drops an active pass that looked
         perfectly legitimate (properly spaced, no Minimum-Lap-Time violation).
@@ -929,16 +957,29 @@ class MarshalController:
 
     def _local_retune(self, vals, times, start_time, run, fmt, opts, timefmt,
                       expected, baseline, sib_thr, old_laps, strict=False):
-        '''Deterministic threshold repair: try the EnterAt/ExitAt this seat
-        used in its other rounds plus a probe grid over the trace span; keep
-        the candidate whose recomputed laps look most like this pilot's
-        history (no sub-Minimum-Lap noise, no merged passes, plausible count).
+        '''Deterministic threshold repair: try the minimal repair of the stored
+        band, the EnterAt/ExitAt this seat used in its other rounds, and a probe
+        grid over the trace span; keep the candidate whose recomputed laps look
+        most like this pilot's history (no sub-Minimum-Lap noise, no merged
+        passes, plausible count).
         Returns (laps, enter, exit) or None when nothing plausible is found.'''
         lo, hi = min(vals), max(vals)
         span = hi - lo
         if span < 15:
             return None
         cands = []
+        # The minimal repair, and the one to try first: keep the EnterAt the
+        # operator picked — it is chosen against the peaks they see on the graph
+        # and is usually right — and only put ExitAt back where it belongs,
+        # clear of the noise floor but well below EnterAt. This is what a
+        # squeezed or inverted band actually needs, and without it the stored
+        # EnterAt is never even considered once the band is judged invalid.
+        for de in (0, -2, 2):
+            e = (run.enter_at or 0) + de
+            if not (lo < e <= hi):
+                continue
+            for f in (0.25, 0.35, 0.45):
+                cands.append((int(e), lo + max(4, int(f * (e - lo)))))
         for t in (sib_thr or []):
             e, x = t.get('enter_at'), t.get('exit_at')
             if e and x and e > x:
@@ -962,8 +1003,14 @@ class MarshalController:
                                   run, opts, fmt, timefmt, probe_rep)
             if probe_rep['blockers']:
                 continue
-            if self._calibration_bad(laps, baseline, expected, x, e, lo, hi,
-                                     sib_thr):
+            # A candidate that reproduces the saved race's own passes needs no
+            # further argument: the diagnostics exist to spot a calibration that
+            # disagrees with reality, and this one agrees with the record. Without
+            # this, a pilot who simply flew fewer laps than the rest of the heat
+            # (a crash, an early landing) blocks the repair of their own band.
+            if not self._reproduces_stored(run, laps, opts['min_lap_ms']) \
+                    and self._calibration_bad(laps, baseline, expected, x, e,
+                                              lo, hi, sib_thr):
                 continue
             if self._loses_good_lap(protect, laps, opts['min_lap_ms']):
                 continue
@@ -1115,15 +1162,20 @@ class MarshalController:
         return all(abs(x - y) <= tol for x, y in zip(a, b))
 
     def _no_flight(self, vals, run, laps):
-        '''True when this seat shows no sign of a flight at all: the trace never
-        climbs out of the noise band and nothing was ever recorded. Typically a
-        pilot who did not start, or crashed before the first gate.'''
+        '''True when this seat shows no sign of a flight at all: nothing was ever
+        recorded and the trace holds no pass to find. Typically a pilot who did
+        not start, crashed before the first gate, or flew nowhere near it.'''
         if laps:
             return False
         if any(not l.deleted for l in (self._safe(
                 lambda: self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or [])):
             return False
-        return (max(vals) - min(vals)) < 15
+        if (max(vals) - min(vals)) < 15:
+            return True
+        # The signal never even reaches the level the operator themself treats
+        # as a pass, so the timer could not have registered one either. Nothing
+        # here is a calibration fault to repair.
+        return bool(run.enter_at) and max(vals) < run.enter_at
 
     # --------------------------------------------------------------- history
 
