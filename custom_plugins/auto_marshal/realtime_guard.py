@@ -61,7 +61,23 @@ MIN_SAMPLES = 6
 SENS_MIN_RISE = {'low': 45, 'normal': 30, 'high': 18}
 # scale applied to a history-derived per-pilot rise, keyed by sensitivity
 SENS_PRIOR_SCALE = {'low': 1.3, 'normal': 1.0, 'high': 0.75}
-PRIOR_RISE_FRACTION = 0.4  # required rise = this share of the pilot's typical rise
+# Required rise as a share of the pilot's typical crossing rise. Only a coarse
+# fallback: how strong a pass is varies from round to round, so a fraction of
+# last round's median is a weak discriminator on its own.
+PRIOR_RISE_FRACTION = 0.4
+# The real discriminator, when history provides it: how high this pilot's
+# signal reaches while they are NOT at the gate (noise and near-misses). A
+# candidate has to beat that ceiling by this margin to count as a pass —
+# otherwise the guard turns near-misses into laps.
+NOISE_RISE_MARGIN = 1
+# The learned feedback factor may pull the requirement down but only nudge it
+# up: past this share of the pilot's typical rise it starts rejecting the
+# ordinary passes it is supposed to catch. This also keeps a factor learned
+# under an earlier, more permissive default from over-correcting.
+PRIOR_RISE_CEILING = 0.8
+# Never demand more than the weakest pass this pilot is known to fly, less a
+# small margin, or real weak passes get rejected outright.
+WEAK_RISE_MARGIN = 2
 # start-line / parked-quad ripples reach ~15 over the floor, so the learned
 # per-pilot threshold must never drop into that band
 RISE_CLAMP = (16, 80)
@@ -74,7 +90,9 @@ HOLESHOT_STRICT_MS = 8000  # start-line ripple window: strong rise required insi
 TUNE_STRONG_FRACTION = 0.7  # rise share of the pilot's prior to re-tune on 1st add
 TUNE_CAP_FRACTION = 0.55   # EnterAt never re-tuned below floor + this x prior rise
 ADD_MATCH_SECS = 1.2       # feedback: an added lap survives if a final lap is this close
-HOLD_SECS = 4.5            # approach-ripple guard: wait this long before injecting
+HOLD_SECS = 4.5            # approach-ripple guard: floor for the hold-off window
+HOLD_MIN_LAP_FRACTION = 0.6  # ...scaled to Minimum Lap Time (see _hold_secs)
+HOLD_SECS_MAX = 12.0       # ...but never hold a pass back longer than this
 PRIOR_TRACES = 2           # prior pilotraces parsed per seat for peak estimation
 TIMER_SOURCES = (0, 2, 3)  # LapSource REALTIME / RECALC / AUTOMATIC
 PRIOR_LAP_SOURCES = (0, 2, 3, 4)   # + API: kept guard adds are real laps too
@@ -352,6 +370,14 @@ class RealtimeGuard:
             seat_opts['pilot_id'] = pilot_id
             seat_opts['min_rise'] = self._seat_min_rise(idx, pilot_id, sens)
             seat_opts['lap_med'] = (self._priors.get(idx) or {}).get('lap_med')
+            # A first pass inside the start-line window normally has to be
+            # stronger than usual, because a powered quad on the line paints
+            # pass-like ripples. When history already measured how high this
+            # pilot reaches while NOT at the gate, min_rise clears that band on
+            # its own and the extra factor would only reject real holeshots.
+            seat_opts['holeshot_min_rise'] = seat_opts['min_rise'] if (
+                self._priors.get(idx) or {}).get('noise_rise') else int(
+                HOLESHOT_RISE_FACTOR * seat_opts['min_rise'])
             self._scan_seat(ctx, race, node, pilot_id, st, seat_opts)
 
     # -------------------------------------------------- history priors (lvl 1)
@@ -396,6 +422,7 @@ class RealtimeGuard:
                         if pr.pilot_id == pid][:PRIOR_TRACES]
             rises = []
             weak_rise = None
+            noise_rise = None
             tune_ok = True
             for pr in cand:
                 try:
@@ -409,8 +436,14 @@ class RealtimeGuard:
                 laps = [l for l in
                         (rhdata.get_savedRaceLaps_by_savedPilotRace(pr.id) or [])
                         if not l.deleted]
+                # What a real pass looks like has to come from the timer or the
+                # operator — never from the guard's own earlier additions. A
+                # kept correction is not independent evidence, and letting one
+                # define "the weakest pass this pilot flies" lets a single
+                # phantom drag the requirement down race after race.
                 peaks = [l.peak_rssi for l in laps
-                         if getattr(l, 'peak_rssi', None)]
+                         if getattr(l, 'peak_rssi', None)
+                         and getattr(l, 'source', None) in TIMER_SOURCES]
                 top = _median(peaks) if peaks else max(vals)
                 if top and top > floor_h:
                     rises.append(top - floor_h)
@@ -418,10 +451,13 @@ class RealtimeGuard:
                     weak = min(peaks) - floor_h
                     if weak_rise is None or weak < weak_rise:
                         weak_rise = weak
-                # noise ceiling vs weakest pass: when this pilot's non-pass
-                # ripples reach as high as their weakest real pass, there is
-                # no safe band to move EnterAt into — live re-tuning down
-                # would only make the node chase noise
+                # How high does this pilot's signal reach when they are NOT at
+                # the gate? Everything outside a recorded pass is either noise
+                # or a near-miss, and that ceiling is the only direct measure of
+                # what a missed-pass candidate has to beat. It also decides
+                # whether live re-tuning is safe at all: when the ceiling
+                # reaches the weakest real pass there is no band to move
+                # EnterAt into and the node would just chase noise.
                 meta = None
                 try:
                     meta = rhdata.get_savedRaceMeta(pr.race_id)
@@ -437,6 +473,10 @@ class RealtimeGuard:
                         if all(abs(t - s) > LAP_MATCH_SECS
                                for s in stamps_s):
                             ceiling = max(ceiling, v)
+                    if ceiling > floor_h:
+                        nr = ceiling - floor_h
+                        if noise_rise is None or nr > noise_rise:
+                            noise_rise = nr
                     if ceiling >= min(peaks) - TUNE_SAFE_GAP:
                         tune_ok = False
             prior = {}
@@ -447,6 +487,9 @@ class RealtimeGuard:
                 # below it or real passes start getting rejected whenever the
                 # feedback bias inches up
                 prior['weak_rise'] = int(weak_rise)
+            if noise_rise is not None:
+                # how high this pilot reaches while NOT at the gate
+                prior['noise_rise'] = int(noise_rise)
             prior['tune_ok'] = tune_ok
             lts = laps_by_pilot.get(pid) or []
             if len(lts) >= 4:
@@ -461,17 +504,28 @@ class RealtimeGuard:
     def _seat_min_rise(self, seat, pilot_id, sens):
         '''Required peak rise for this seat: pilot's history when available,
         the global sensitivity constant otherwise, scaled by the learned
-        per-pilot feedback factor — but never above the pilot's weakest kept
-        pass, or real passes get rejected as soon as the bias inches up.'''
+        per-pilot feedback factor.
+
+        A craft passing BESIDE the gate still paints a peak, so the requirement
+        must clear whatever this pilot reaches while not at the gate
+        (`noise_rise`) — that measured ceiling is a far better discriminator
+        than any fraction of their typical pass, which swings from round to
+        round. Two upper bounds stop it overshooting into the real passes: a
+        share of the typical rise, and the weakest pass they are known to fly.'''
         prior = self._priors.get(seat) or {}
         base = float(SENS_MIN_RISE.get(sens, 30))
         rise = prior.get('rise')
         if rise:
             base = PRIOR_RISE_FRACTION * rise * SENS_PRIOR_SCALE.get(sens, 1.0)
         base *= self._bias.get(str(pilot_id), 1.0)
+        noise = prior.get('noise_rise')
+        if noise:
+            base = max(base, noise + NOISE_RISE_MARGIN)
+        if rise:
+            base = min(base, PRIOR_RISE_CEILING * rise)
         weak = prior.get('weak_rise')
         if weak:
-            base = min(base, max(RISE_CLAMP[0], weak - 2))
+            base = min(base, max(RISE_CLAMP[0], weak - WEAK_RISE_MARGIN))
         return int(max(RISE_CLAMP[0], min(RISE_CLAMP[1], base)))
 
     # ------------------------------------------------------------- per seat
@@ -581,7 +635,8 @@ class RealtimeGuard:
             # in the first moments — require a clearly stronger peak there
             # (late first passes are judged like any other pass)
             if lap_ts_ms < HOLESHOT_STRICT_MS \
-                    and rise < HOLESHOT_RISE_FACTOR * opts['min_rise']:
+                    and rise < opts.get('holeshot_min_rise',
+                                        HOLESHOT_RISE_FACTOR * opts['min_rise']):
                 self._log_decision(node.index, opts, lap_ts_ms, peak, floor,
                                    'skipped', 'weak_holeshot')
                 return 'skip'
@@ -610,15 +665,16 @@ class RealtimeGuard:
         # a few seconds before the real crossing peak. Hold the candidate; if
         # the node starts a crossing (or a lap lands) right behind it, the
         # candidate was the ripple of that pass — drop it.
-        if now - t_pk < HOLD_SECS:
+        hold = self._hold_secs(opts)
+        if now - t_pk < hold:
             return 'wait'
-        if any(t_pk < cs <= t_pk + HOLD_SECS
+        if any(t_pk < cs <= t_pk + hold
                for cs in st.get('cross_starts', ())):
             self._log_decision(node.index, opts, lap_ts_ms, peak, floor,
                                'skipped', 'ripple_before_pass')
             return 'skip'
         for l in laps:
-            if lap_ts_ms < l.lap_time_stamp <= lap_ts_ms + HOLD_SECS * 1000:
+            if lap_ts_ms < l.lap_time_stamp <= lap_ts_ms + hold * 1000:
                 return 'skip'   # the real pass right behind it is recorded
 
         callsign = self._callsign(pilot_id)
@@ -672,6 +728,20 @@ class RealtimeGuard:
         logger.info('auto_marshal rt: seat %s (%s) missed %s added at %.0fms, %s',
                     node.index + 1, callsign, action, lap_ts_ms, detail)
         return 'fixed'
+
+    @staticmethod
+    def _hold_secs(opts):
+        '''How long a candidate pass is held back to see whether the node
+        reports a real crossing right behind it (making the candidate that
+        pass's approach ripple).
+
+        Two crossings closer together than the Minimum Lap Time are the same
+        pass by RotorHazard's own definition, so the window has to scale with
+        it: on a course with 10 s minimum laps a ripple can precede the real
+        peak by well over the old fixed 4.5 s, and injecting in between creates
+        a sub-minimum-lap pair that someone has to clean up by hand.'''
+        ml = (opts.get('min_lap_ms') or 0) / 1000.0
+        return max(HOLD_SECS, min(HOLD_SECS_MAX, HOLD_MIN_LAP_FRACTION * ml))
 
     # ------------------------------------------------------------ corrections
 

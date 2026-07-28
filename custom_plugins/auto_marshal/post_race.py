@@ -69,6 +69,14 @@ HIST_FAST_BLOCK = 0.55
 HIST_SLOW_WARN = 1.75
 HIST_Z_WARN = 3.0
 
+# EnterAt and ExitAt form a hysteresis band: EnterAt opens a crossing, ExitAt
+# closes it. Squeeze them together and every dip inside a single pass ends the
+# crossing, so one pass is recorded as several — Minimum Lap Time then has to
+# clean up the duplicates. A healthy band spans a good part of the way down
+# towards the noise floor; anything below this share of the pilot's own signal
+# range is reported, and is never proposed by the re-tune.
+MIN_BAND_FRACTION = 0.12
+
 
 class MarshalController:
     def __init__(self, rhapi):
@@ -573,6 +581,13 @@ class MarshalController:
 
         rep['enter_at'], rep['exit_at'] = enter, exit_at
 
+        # 3a) The stored band is what the timer will use again next race, so
+        #     report a squeezed one even when the recompute worked around it —
+        #     otherwise the operator keeps flying a calibration that records one
+        #     pass as several and leans on Minimum Lap Time to hide it.
+        if stored_ok and not self._band_ok(run.enter_at, run.exit_at, rmin, rmax):
+            rep['warnings'].append('NARROW_THRESHOLD_BAND')
+
         # 4) protected-lap min-lap conflict blocker
         if opts['strict_min_lap']:
             for l in laps:
@@ -828,6 +843,16 @@ class MarshalController:
                     else abs(na - expected) <= abs(oa - expected))
         return na > oa if strict else na >= oa
 
+    @staticmethod
+    def _band_ok(enter_at, exit_at, rmin, rmax):
+        '''Is the gap between EnterAt and ExitAt wide enough to hold a single
+        pass together? Judged against this pilot's own signal range, since a
+        gate that swings 90 counts needs a wider band than one swinging 30.'''
+        span = (rmax or 0) - (rmin or 0)
+        if span <= 0 or enter_at is None or exit_at is None:
+            return True
+        return (enter_at - exit_at) >= max(3, int(MIN_BAND_FRACTION * span))
+
     def _loses_good_lap(self, old_laps, new_laps, min_lap_ms):
         '''True when a candidate calibration drops an active pass that looked
         perfectly legitimate under the stored thresholds (properly spaced, no
@@ -871,6 +896,11 @@ class MarshalController:
         best = None
         for e, x in dict.fromkeys(cands):
             if not (lo < x < e <= hi):
+                continue
+            # Sibling rounds are a candidate source, so a squeezed band on one
+            # round would otherwise be copied onto all the others. Never
+            # propose a calibration that cannot hold a pass together.
+            if not self._band_ok(e, x, lo, hi):
                 continue
             probe_rep = {'warnings': [], 'blockers': [], 'deleted_count': 0}
             laps = self._finalize(self._recalc(vals, times, start_time, e, x),

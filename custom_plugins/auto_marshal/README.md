@@ -40,6 +40,16 @@ timer's own CPU:
   node is already handling are skipped, corrections are capped per pilot per
   race, and everything is announced (priority message + a corrections feed in
   the panel) and logged.
+- **What counts as a pass is measured, not guessed.** A craft flying *near* the
+  gate also paints a peak, so at race start the plugin measures how high each
+  pilot's signal reaches while they are **not** at the gate — every part of
+  their earlier traces outside a recorded pass — and requires a candidate to
+  beat that ceiling. This is far more reliable than a fraction of their typical
+  pass, which swings from round to round. Two bounds stop the requirement
+  overshooting into the real passes: a share of the typical rise, and the
+  weakest pass the pilot is known to fly. Passes the guard added itself are
+  never used as evidence of what a real pass looks like, so one bad correction
+  cannot lower the bar for the rest of the event.
 - **Learning (local, on by default):** at race start each seated pilot's saved
   races provide priors — the typical crossing rise above the noise floor (from
   stored lap peaks / RSSI traces) sets a per-pilot detection threshold, and the
@@ -110,6 +120,12 @@ changes nothing:
 - **"Did not fly" is not a fault.** A seat whose trace never rises to gate
   level and that has no recorded lap is reported as such and left untouched,
   instead of demanding a manual calibration review.
+- **A squeezed calibration is reported, never copied.** EnterAt and ExitAt are a
+  hysteresis pair: with no gap between them every dip inside one pass ends the
+  crossing, so a single pass is recorded several times and Minimum Lap Time has
+  to delete the duplicates. Such a calibration raises a **squeezed band**
+  warning, and the re-tune will never propose one — including when it is copied
+  from the seat's other rounds.
 
 ## Panel
 

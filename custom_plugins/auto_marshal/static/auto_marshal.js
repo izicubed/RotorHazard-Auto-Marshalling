@@ -55,6 +55,7 @@
 		BAD_CALIBRATION_UNRESOLVED: ['check manually', 'Automatic thresholds could not be resolved — review on the Marshal graph.'],
 		NO_FLIGHT: ['did not fly', 'The RSSI trace never rises to gate level and no lap was recorded — this pilot did not start, or crashed before the first gate. Nothing to marshal; the seat is left untouched.'],
 		FEWER_LAPS_THAN_SIBLINGS: ['fewer laps', 'The stored calibration reproduces these passes correctly, there are just fewer than in this heat’s other rounds (a crash or an early landing). No calibration fault.'],
+		NARROW_THRESHOLD_BAND: ['squeezed band', 'EnterAt and ExitAt sit almost on top of each other. The two are a hysteresis pair — EnterAt starts a pass, ExitAt ends it — so with no gap between them every dip inside a single pass ends the crossing and one pass gets recorded as several, leaving Minimum Lap Time to delete the duplicates. Lower ExitAt to roughly a third of the way up from the noise floor to EnterAt, in Settings → the node calibration.'],
 		PROTECTED_LAP_UNDER_MIN_LAP: ['short manual lap', 'A manual/API lap is shorter than the Minimum Lap Time; left untouched.'],
 		HIGH_CONFIDENCE_SHORT_FALSE_PASS: ['likely false lap', 'A lap is far faster than this pilot usually flies.'],
 		FAST_VS_HISTORY: ['fast lap', 'Faster than this pilot’s typical lap.'],
@@ -68,6 +69,8 @@
 	};
 	// Warnings that describe what happened rather than something to fix.
 	var INFO_CODES = { NO_FLIGHT: 1, FEWER_LAPS_THAN_SIBLINGS: 1, INSUFFICIENT_HISTORY: 1 };
+	// Warnings about the calibration itself rather than this one result.
+	var SETUP_CODES = { NARROW_THRESHOLD_BAND: 1 };
 	function label(code) {
 		var key = String(code || '').split(':')[0].split(' ')[0];
 		if (LABELS[key]) { return LABELS[key]; }
@@ -218,8 +221,11 @@
 			else if (p.unchanged) { h += chip('unchanged', 'rh-cm-c-ok'); }
 			(p.warnings || []).forEach(function (w) {
 				// "did not fly" / "fewer laps" are statements of fact, not
-				// problems with the calibration — keep them calm.
-				h += chipFor(w, INFO_CODES[w] ? 'rh-cm-c-info' : 'rh-cm-c-warn');
+				// problems with the calibration — keep them calm. A squeezed
+				// threshold band is the opposite: it needs fixing in Settings,
+				// so it gets the attention-grabbing style.
+				h += chipFor(w, SETUP_CODES[w] ? 'rh-cm-c-review'
+					: (INFO_CODES[w] ? 'rh-cm-c-info' : 'rh-cm-c-warn'));
 			});
 			bot.innerHTML = h;
 		} else if (p.status === 'err') {

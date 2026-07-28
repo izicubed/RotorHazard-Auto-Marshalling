@@ -7,6 +7,6 @@
     "documentation_uri": "https://github.com/izicubed/RotorHazard-Auto-Marshalling",
     "license": "RotorHazard",
     "license_uri": "https://github.com/RotorHazard/RotorHazard/blob/main/LICENSE",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "required_rhapi_version": "1.0"
 }
