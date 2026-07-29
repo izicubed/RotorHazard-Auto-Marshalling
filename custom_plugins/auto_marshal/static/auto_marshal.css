@@ -226,9 +226,23 @@
 #rh-cm .rh-cm-head {
 	display: flex; align-items: center; gap: 6px; padding: 5px 9px;
 	background: var(--cm-head-bg); border-bottom: 1px solid var(--cm-edge);
-	/* same slim-bar height as the gate calibration panel next door */
+	/* SHARED SLIM-BAR GEOMETRY — identical in every panel of ours so all of
+	   them are exactly the same height when collapsed: 18px header row +
+	   2 x 5px padding + 2 x 1px panel border = 30px. */
 	min-height: 18px; box-sizing: content-box;
 }
+/* Nothing in the header may be taller than that 18px row. RotorHazard's
+   global `button, select { min-height: 2em; box-sizing: border-box }` would
+   otherwise size a header control at 2x its own font-size (e.g. 22px for an
+   11px button) and silently make this panel taller than its neighbours. */
+#rh-cm .rh-cm-head button, #rh-cm .rh-cm-head select {
+	min-height: 0; height: 18px; line-height: 1;
+	box-sizing: border-box; padding-top: 0; padding-bottom: 0;
+}
+/* the segmented school switch is the box that owns the 18px; its two buttons
+   stretch inside it (they must not carry a height of their own) */
+#rh-cm .rh-cm-head .rh-cm-school { height: 18px; box-sizing: border-box; }
+#rh-cm .rh-cm-head .rh-cm-sch { height: auto; }
 #rh-cm .rh-cm-title { font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
 	text-transform: uppercase; flex: 1 1 auto; }
 #rh-cm .rh-cm-spark { color: var(--cm-spark); margin-right: 2px; }
