@@ -56,7 +56,8 @@
 		NO_FLIGHT: ['did not fly', 'The RSSI trace never rises to gate level and no lap was recorded — this pilot did not start, or crashed before the first gate. Nothing to marshal; the seat is left untouched.'],
 		FEWER_LAPS_THAN_SIBLINGS: ['fewer laps', 'The stored calibration reproduces these passes correctly, there are just fewer than in this heat’s other rounds (a crash or an early landing). No calibration fault.'],
 		WOULD_LOSE_STORED_PASS: ['keeping saved laps', 'Recomputing this pilot from the stored RSSI trace produces fewer passes than the saved race already holds, and the missing one looks perfectly good. The stored trace is a compressed peak/nadir history, so with a high ExitAt two passes can merge into one crossing in it while the node — sampling at full rate during the race — recorded both. The saved race knows more here, so nothing is proposed for this pilot.'],
-		NARROW_THRESHOLD_BAND: ['squeezed band', 'EnterAt and ExitAt sit almost on top of each other. The two are a hysteresis pair — EnterAt starts a pass, ExitAt ends it — so with no gap between them every dip inside a single pass ends the crossing and one pass gets recorded as several, leaving Minimum Lap Time to delete the duplicates. Lower ExitAt to roughly a third of the way up from the noise floor to EnterAt, in Settings → the node calibration.'],
+		NARROW_THRESHOLD_BAND: ['squeezed band', 'EnterAt and ExitAt sit almost on top of each other, which the Classic school treats as a fault: the two are a hysteresis pair, so with no gap between them every dip inside a single pass ends the crossing and one pass gets recorded as several, leaving Minimum Lap Time to delete the duplicates. Either lower ExitAt to roughly a third of the way up from the noise floor to EnterAt, or — if you calibrate this way on purpose — switch the plugin to YGR tuning in the panel header so it judges the race by those rules instead.'],
+		WIDE_THRESHOLD_BAND: ['wide band', 'This seat has a wide EnterAt/ExitAt gap while the plugin is set to YGR tuning, which expects ExitAt parked 1-2 counts under EnterAt. Either bring ExitAt up under EnterAt, or switch the header back to Classic if this timer is tuned the handbook way.'],
 		PROTECTED_LAP_UNDER_MIN_LAP: ['short manual lap', 'A manual/API lap is shorter than the Minimum Lap Time; left untouched.'],
 		HIGH_CONFIDENCE_SHORT_FALSE_PASS: ['likely false lap', 'A lap is far faster than this pilot usually flies.'],
 		FAST_VS_HISTORY: ['fast lap', 'Faster than this pilot’s typical lap.'],
@@ -72,7 +73,7 @@
 	var INFO_CODES = { NO_FLIGHT: 1, FEWER_LAPS_THAN_SIBLINGS: 1, INSUFFICIENT_HISTORY: 1,
 		WOULD_LOSE_STORED_PASS: 1 };
 	// Warnings about the calibration itself rather than this one result.
-	var SETUP_CODES = { NARROW_THRESHOLD_BAND: 1 };
+	var SETUP_CODES = { NARROW_THRESHOLD_BAND: 1, WIDE_THRESHOLD_BAND: 1 };
 	function label(code) {
 		var key = String(code || '').split(':')[0].split(' ')[0];
 		if (LABELS[key]) { return LABELS[key]; }
@@ -145,6 +146,9 @@
 			'<div class="rh-cm-title"><span class="rh-cm-spark">✦</span> Auto Marshalling</div>' +
 			'<div class="rh-cm-headsum"></div>' +
 			'<button class="rh-cm-toggle" title="Enable/disable automatic marshalling (post-race flow and in-race corrections). Manual runs from the Marshal page always work."></button>' +
+			'<div class="rh-cm-school" title="Which calibration style this timer is tuned in. It decides how a race is judged and what a repair looks like — see Settings for the full description.">' +
+			'<button class="rh-cm-sch" data-mode="classic">Classic</button>' +
+			'<button class="rh-cm-sch" data-mode="ygr">YGR</button></div>' +
 			'<div class="rh-cm-mode"></div><div class="rh-cm-timer"></div></div>' +
 			'<div class="rh-cm-sub"></div>' +
 			'<div class="rh-cm-ctl"></div>' +
@@ -165,6 +169,11 @@
 		panel.querySelector('.rh-cm-toggle').addEventListener('click', function () {
 			socket.emit('auto_marshal_set_enabled', { enabled: !state.enabled });
 		});
+		Array.prototype.forEach.call(panel.querySelectorAll('.rh-cm-sch'), function (b) {
+			b.addEventListener('click', function () {
+				socket.emit('auto_marshal_set_mode', { mode: b.getAttribute('data-mode') });
+			});
+		});
 		place();
 		return panel;
 	}
@@ -180,6 +189,14 @@
 
 	function busy() { return state.phase === 'running' || state.phase === 'waiting_countdown'; }
 	function seatLabel(s) { return 'S' + ((s | 0) + 1); }
+
+	function renderSchool() {
+		if (!panel) { return; }
+		var cur = state.mode === 'ygr' ? 'ygr' : 'classic';
+		Array.prototype.forEach.call(panel.querySelectorAll('.rh-cm-sch'), function (b) {
+			b.classList.toggle('rh-cm-sch-on', b.getAttribute('data-mode') === cur);
+		});
+	}
 
 	function renderToggle() {
 		var b = panel && panel.querySelector('.rh-cm-toggle');
@@ -253,6 +270,7 @@
 		ensurePanel();
 		applyThemeClasses();
 		renderToggle();
+		renderSchool();
 		var evs = rtEvents();
 		// a new real-time correction arriving expands the panel this session
 		if (evs.length > rtSeenCount) { autoOpen = true; userOpen = null; }
@@ -277,6 +295,7 @@
 				(collapsible() ? '' : ' rh-cm-static') +
 				(isLight() ? ' rh-cm-light' : '');
 			renderToggle();
+			renderSchool();
 			q('.rh-cm-chev').textContent = mopen ? '▾' : '▸';
 			q('.rh-cm-headsum').innerHTML = (!mopen && state.enabled === false)
 				? '<span class="rh-cm-headmut">automatic marshalling is off</span>' : '';

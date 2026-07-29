@@ -95,6 +95,63 @@ thresholds even when the stored calibration looks fine, and then accepts the
 result only if it is strictly better — so the button always does something
 useful without ever trading a good calibration for a cosmetic one.
 
+## Two tuning schools: Classic and YGR
+
+There is more than one way to calibrate a gate, and a band that is a defect
+under one school is the whole point of the other. The plugin therefore has to be
+told which one this timer is tuned in — a switch in the panel header (**Classic |
+YGR**), also available as *Tuning school* in Settings. It decides how a race is
+judged, what counts as a fault worth reporting, and what shape a repair takes.
+
+### Classic — a wide hysteresis band
+
+The RotorHazard handbook approach. EnterAt sits below the peak of every real
+crossing; ExitAt sits far below it but clear of the noise floor. The wide gap is
+hysteresis: it holds a pass together through the dips inside its own peak, so one
+pass is one crossing. Two numbers to get right, and the failure modes are the
+familiar ones — EnterAt in the noise invents passes, ExitAt below the noise floor
+lets two passes merge into one.
+
+In this school the plugin flags a squeezed band (**squeezed band**), never
+proposes one, and treats a pile of sub-Minimum-Lap crossings as evidence that
+EnterAt has slipped into the noise.
+
+### YGR — ExitAt parked just under EnterAt
+
+Named after the pilot who arrived at it: **YGR** has run his own timer this way
+for two seasons of club racing, and it is the calibration his events are judged
+on. It inverts the usual advice — ExitAt goes **1–2 counts below EnterAt** — and
+it is a deliberate trade, not a mistake:
+
+- **One number to tune instead of two.** The gate is characterised by a single
+  threshold. There is no second value whose relationship to the noise floor has
+  to be re-checked whenever conditions, antennas or power change.
+- **Two passes can never merge.** The classic failure where a too-low ExitAt
+  keeps a crossing open, swallowing the next pass into the same crossing, is
+  structurally impossible: a crossing closes the moment the signal falls a
+  couple of counts back through the threshold.
+- **The timestamp is pinned to the threshold crossing.** The peak window is very
+  short, so the recorded moment is essentially "when the craft reached the
+  level", which repeats well from lap to lap and from pilot to pilot.
+- **The cost is duplicate crossings, and it is paid by Minimum Lap Time.** A
+  single pass whose peak wobbles across the threshold registers several times.
+  RotorHazard's own Minimum-Lap-Time resolution collapses the burst back to one
+  pass, which is why this school needs Minimum Lap Time set sensibly — it is
+  load-bearing here, not a safety net.
+
+With YGR selected the plugin stops treating any of that as a fault: the squeezed
+band is expected, duplicate crossings are no longer read as a bad EnterAt, and a
+re-tune keeps ExitAt tucked under EnterAt instead of widening the band. What it
+still reports is a genuinely degenerate case — **ExitAt equal to EnterAt**, which
+leaves no hysteresis at all — and it repairs that by moving ExitAt down by the
+usual count or two rather than by converting the seat to Classic. A seat with a
+wide band while YGR is selected is flagged the other way round (**wide band**),
+since it is then the odd one out.
+
+The real-time guard follows the same rule: when it re-tunes a seat mid-race it
+leaves the band shaped the way the operator calibrates, so it can never quietly
+convert a timer from one school to the other between rounds.
+
 ### Protecting what is already there
 
 The post-race flow is built so that running it on a correctly marshalled race

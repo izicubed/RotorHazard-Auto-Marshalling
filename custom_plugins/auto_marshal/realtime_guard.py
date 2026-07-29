@@ -98,6 +98,13 @@ TIMER_SOURCES = (0, 2, 3)  # LapSource REALTIME / RECALC / AUTOMATIC
 PRIOR_LAP_SOURCES = (0, 2, 3, 4)   # + API: kept guard adds are real laps too
 TUNE_SAFE_GAP = 4          # noise ceiling must sit this far under the weakest pass
 
+# Tuning schools (see post_race.MODE_*): the live re-tune has to leave the band
+# shaped the way the operator calibrates, or it would quietly convert their
+# timer to the other school mid-race.
+OPT_MODE = 'cm_mode'
+MODE_YGR = 'ygr'
+YGR_GAP = 2                # ExitAt this far under EnterAt in the YGR school
+
 
 class RealtimeGuard:
     def __init__(self, rhapi):
@@ -183,6 +190,11 @@ class RealtimeGuard:
             return int(float(self._opt(name, default)))
         except (TypeError, ValueError):
             return default
+
+    def _ygr(self):
+        '''True when this timer is calibrated the YGR way (ExitAt just under
+        EnterAt) — the live re-tune must preserve that shape.'''
+        return self._opt(OPT_MODE, 'classic') == MODE_YGR
 
     # ----------------------------------------------------------- event hooks
 
@@ -766,9 +778,15 @@ class RealtimeGuard:
             changed.append('EnterAt {}'.format(new_enter))
         enter_now = node.enter_at_level or new_enter
         exit_now = node.exit_at_level or 0
-        if exit_now >= enter_now or exit_now <= floor:
+        if self._ygr():
+            # keep ExitAt tucked under the (possibly new) EnterAt
+            new_exit = max(1, enter_now - YGR_GAP)
+            reshape = new_exit != exit_now and exit_now < enter_now - YGR_GAP - 1
+        else:
             new_exit = floor + max(6, int(0.35 * max(1, enter_now - floor)))
             new_exit = min(new_exit, enter_now - 5)
+            reshape = exit_now >= enter_now or exit_now <= floor
+        if reshape:
             if new_exit > 0 and new_exit != exit_now:
                 ctx.calibration.set_exit_at_level(node.index, new_exit)
                 changed.append('ExitAt {}'.format(new_exit))
@@ -784,8 +802,11 @@ class RealtimeGuard:
         n = min(len(node.history_values), len(node.history_times))
         floor = min(node.history_values[:n]) if n else 0
         enter = node.enter_at_level or 0
-        new_exit = floor + max(8, int(0.30 * max(1, enter - floor)))
-        new_exit = min(new_exit, enter - 5) if enter > 5 else new_exit
+        if self._ygr():
+            new_exit = max(1, enter - YGR_GAP)
+        else:
+            new_exit = floor + max(8, int(0.30 * max(1, enter - floor)))
+            new_exit = min(new_exit, enter - 5) if enter > 5 else new_exit
         if new_exit > (node.exit_at_level or 0):
             ctx.calibration.set_exit_at_level(node.index, new_exit)
         try:

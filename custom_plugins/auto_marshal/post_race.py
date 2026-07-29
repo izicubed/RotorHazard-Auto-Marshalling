@@ -52,6 +52,7 @@ OPT_DEL_MANUAL = 'cm_allow_delete_manual'
 OPT_DEL_API = 'cm_allow_delete_api'
 OPT_REPORT_ATTR = 'cm_report_attr'
 OPT_THEME = 'cm_theme'
+OPT_MODE = 'cm_mode'
 
 # Socket events (server <-> browser)
 STATE_EVENT = 'auto_marshal_state'
@@ -62,6 +63,26 @@ EV_RUN_PILOT = 'auto_marshal_run_pilot'
 EV_APPLY = 'auto_marshal_apply'
 EV_CONTEXT = 'auto_marshal_context'
 EV_SET_ENABLED = 'auto_marshal_set_enabled'
+EV_SET_MODE = 'auto_marshal_set_mode'
+
+# ------------------------------------------------------------ tuning schools
+#
+# Two ways to calibrate a gate, and the plugin has to judge a race by the rules
+# of the one actually in use — a band that is a defect under one is the whole
+# point of the other.
+#
+# MODE_CLASSIC ("Classic") is the RotorHazard handbook approach: EnterAt below
+# every real crossing peak, ExitAt far below it but clear of the noise floor.
+# The wide gap is hysteresis — it holds a pass together through the dips in its
+# own peak, so one pass is one crossing.
+#
+# MODE_YGR is the single-threshold approach: ExitAt is parked 1-2 counts under
+# EnterAt, so a crossing closes the instant the signal falls back through the
+# threshold. See the plugin README for what it buys and what it costs.
+MODE_CLASSIC = 'classic'
+MODE_YGR = 'ygr'
+YGR_GAP = 2                # the gap the YGR school aims for
+YGR_BAND_MAX = 4           # a band this narrow or narrower is YGR-shaped
 
 # History thresholds (spec §9.5)
 HIST_FAST_WARN = 0.75
@@ -120,6 +141,14 @@ class MarshalController:
                 kw['options'] = options
             fields.register_option(UIField(**kw), PLUGIN_ID)
 
+        opt(OPT_MODE, 'Tuning school', UIFieldType.SELECT, MODE_CLASSIC,
+            'Which calibration style this timer is tuned in — it decides how a '
+            'race is judged and what a repair looks like. Classic: a wide '
+            'EnterAt/ExitAt band (the RotorHazard handbook). YGR: ExitAt parked '
+            '1-2 counts under EnterAt, letting Minimum Lap Time absorb the '
+            'duplicate crossings. Also switchable from the panel header.',
+            options=[UIFieldSelectOption(MODE_CLASSIC, 'Classic (wide band)'),
+                     UIFieldSelectOption(MODE_YGR, 'YGR (ExitAt just under EnterAt)')])
         opt(OPT_ENABLED, 'Auto-marshal after each race is saved',
             UIFieldType.CHECKBOX, True,
             'Master switch for the automatic run (with countdown). Manual runs '
@@ -190,6 +219,11 @@ class MarshalController:
         except (TypeError, ValueError):
             return default
 
+    def _school(self):
+        '''Which tuning school this timer is calibrated in.'''
+        val = self._opt(OPT_MODE, MODE_CLASSIC)
+        return MODE_YGR if val == MODE_YGR else MODE_CLASSIC
+
     # ------------------------------------------------------------- rh access
 
     @property
@@ -216,6 +250,7 @@ class MarshalController:
             self._state['elapsed'] = round(monotonic() - self._t0, 1)
         self._state['theme'] = self._opt(OPT_THEME, 'dark')
         self._state['enabled'] = self._opt_bool(OPT_ENABLED, True)
+        self._state['mode'] = self._school()
         try:
             self._rhapi.ui.socket_broadcast(STATE_EVENT, self._state)
         except Exception:
@@ -224,6 +259,7 @@ class MarshalController:
     def on_get_state(self, _data=None):
         self._state['theme'] = self._opt(OPT_THEME, 'dark')
         self._state['enabled'] = self._opt_bool(OPT_ENABLED, True)
+        self._state['mode'] = self._school()
         try:
             self._rhapi.ui.socket_send(STATE_EVENT, self._state)
         except Exception:
@@ -248,10 +284,26 @@ class MarshalController:
                     'enabled' if val else 'disabled')
         self._push()
 
+    def on_set_mode(self, data):
+        '''Panel switch between the Classic and YGR tuning schools.'''
+        val = (data or {}).get('mode')
+        if val not in (MODE_CLASSIC, MODE_YGR):
+            return
+        try:
+            self._rhapi.db.option_set(OPT_MODE, val)
+        except Exception:
+            logger.exception('auto_marshal mode switch failed')
+            return
+        self._notify('Auto Marshalling: {} tuning'.format(
+            'YGR (ExitAt just under EnterAt)' if val == MODE_YGR
+            else 'Classic (wide band)'))
+        logger.info('auto_marshal tuning school set to %s', val)
+        self._push()
+
     def on_option_set(self, args):
-        '''Re-broadcast the panel state when the theme option changes so all
-        open pages restyle immediately.'''
-        if (args or {}).get('option') == OPT_THEME:
+        '''Re-broadcast the panel state when the theme or the tuning school
+        changes so all open pages update immediately.'''
+        if (args or {}).get('option') in (OPT_THEME, OPT_MODE):
             self._push()
 
     def _seat_entry(self, seat):
@@ -593,7 +645,9 @@ class MarshalController:
         #     otherwise the operator keeps flying a calibration that records one
         #     pass as several and leans on Minimum Lap Time to hide it.
         if stored_ok and not self._band_ok(run.enter_at, run.exit_at, rmin, rmax):
-            rep['warnings'].append('NARROW_THRESHOLD_BAND')
+            rep['warnings'].append('WIDE_THRESHOLD_BAND'
+                                   if self._school() == MODE_YGR
+                                   else 'NARROW_THRESHOLD_BAND')
 
         # 3b) Nothing flew past this gate: there is no lap set to check, and the
         #     remaining diagnostics would only complain about a calibration that
@@ -854,14 +908,19 @@ class MarshalController:
         # Recalc had to delete a pile of sub-Minimum-Lap crossings -> EnterAt
         # sits in the noise band and the trace is full of false passes. (Twins
         # of protected manual/API laps are legitimate duplicates, not noise.)
-        prot = [l['lap_time_stamp'] for l in active
-                if l['source'] in PROTECTED_SOURCES]
-        short_dels = sum(
-            1 for l in laps
-            if l['deleted'] and 'SHORT_LAP_DELETED' in (l.get('flags') or ())
-            and not any(abs(l['lap_time_stamp'] - p) <= 2500 for p in prot))
-        if short_dels >= max(3, int(0.25 * (n + short_dels))):
-            return True
+        #
+        # Not a signal at all under the YGR school: there the band is deliberately
+        # thin, so a pass routinely registers several times and Minimum Lap Time
+        # collapsing the duplicates is the mechanism working as designed.
+        if self._school() != MODE_YGR:
+            prot = [l['lap_time_stamp'] for l in active
+                    if l['source'] in PROTECTED_SOURCES]
+            short_dels = sum(
+                1 for l in laps
+                if l['deleted'] and 'SHORT_LAP_DELETED' in (l.get('flags') or ())
+                and not any(abs(l['lap_time_stamp'] - p) <= 2500 for p in prot))
+            if short_dels >= max(3, int(0.25 * (n + short_dels))):
+                return True
         # Far below the EnterAt this seat used in its other rounds -> almost
         # certainly a mid-race auto-correction gone wrong, not a real change.
         if sib_thresholds:
@@ -887,15 +946,23 @@ class MarshalController:
                     else abs(na - expected) <= abs(oa - expected))
         return na > oa if strict else na >= oa
 
-    @staticmethod
-    def _band_ok(enter_at, exit_at, rmin, rmax):
-        '''Is the gap between EnterAt and ExitAt wide enough to hold a single
-        pass together? Judged against this pilot's own signal range, since a
-        gate that swings 90 counts needs a wider band than one swinging 30.'''
-        span = (rmax or 0) - (rmin or 0)
-        if span <= 0 or enter_at is None or exit_at is None:
+    def _band_ok(self, enter_at, exit_at, rmin, rmax):
+        '''Is this band shaped the way the selected tuning school intends?
+
+        Classic wants a gap wide enough to hold a single pass together through
+        the dips in its own peak, judged against this pilot's signal range — a
+        gate that swings 90 counts needs a wider band than one swinging 30.
+        YGR wants the opposite: ExitAt right under EnterAt, so a wide band is
+        the deviation there.'''
+        if enter_at is None or exit_at is None:
             return True
-        return (enter_at - exit_at) >= max(3, int(MIN_BAND_FRACTION * span))
+        gap = enter_at - exit_at
+        if self._school() == MODE_YGR:
+            return 0 < gap <= YGR_BAND_MAX
+        span = (rmax or 0) - (rmin or 0)
+        if span <= 0:
+            return True
+        return gap >= max(3, int(MIN_BAND_FRACTION * span))
 
     def _protected_passes(self, run, old_laps):
         '''The passes a re-tune is not allowed to lose: the ones the stored
@@ -917,6 +984,14 @@ class MarshalController:
                        and abs(it['lap_time_stamp'] - ts) <= 1500 for it in items):
                 items.append({'lap_time_stamp': ts, 'deleted': False})
         return items
+
+    @staticmethod
+    def _exit_candidates(enter_at, rmin, ygr):
+        '''Where to put ExitAt for a given EnterAt, per tuning school.'''
+        if ygr:
+            return [enter_at - g for g in (1, 2, 3) if enter_at - g > rmin]
+        return [rmin + max(4, int(f * (enter_at - rmin)))
+                for f in (0.25, 0.35, 0.45)]
 
     def _reproduces_stored(self, run, laps, min_lap_ms):
         '''Does this candidate calibration produce exactly the passes the saved
@@ -974,20 +1049,21 @@ class MarshalController:
         # clear of the noise floor but well below EnterAt. This is what a
         # squeezed or inverted band actually needs, and without it the stored
         # EnterAt is never even considered once the band is judged invalid.
+        ygr = self._school() == MODE_YGR
         for de in (0, -2, 2):
             e = (run.enter_at or 0) + de
             if not (lo < e <= hi):
                 continue
-            for f in (0.25, 0.35, 0.45):
-                cands.append((int(e), lo + max(4, int(f * (e - lo)))))
+            for x in self._exit_candidates(e, lo, ygr):
+                cands.append((int(e), int(x)))
         for t in (sib_thr or []):
             e, x = t.get('enter_at'), t.get('exit_at')
             if e and x and e > x:
                 cands.append((int(e), int(x)))
         for f in (0.45, 0.55, 0.65, 0.75, 0.85):
             e = int(lo + span * f)
-            x = lo + max(3, int(0.25 * (e - lo)))
-            cands.append((e, x))
+            for x in self._exit_candidates(e, lo, ygr):
+                cands.append((e, int(x)))
         protect = self._protected_passes(run, old_laps)
         best = None
         for e, x in dict.fromkeys(cands):

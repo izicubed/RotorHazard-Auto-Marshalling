@@ -16,7 +16,7 @@ Fully local, deterministic marshalling — no API keys, no internet:
 from eventmanager import Evt
 from .post_race import (
     MarshalController, EV_GET_STATE, EV_CANCEL, EV_RUN_RACE, EV_RUN_PILOT,
-    EV_APPLY, EV_CONTEXT, EV_SET_ENABLED,
+    EV_APPLY, EV_CONTEXT, EV_SET_ENABLED, EV_SET_MODE,
 )
 from .realtime_guard import RealtimeGuard, EV_RT_GET
 
@@ -37,6 +37,8 @@ def initialize(rhapi):
     rhapi.ui.socket_listen(EV_CONTEXT, controller.on_context)
     # panel Enabled/Disabled toggle (master switch: auto flow + realtime guard)
     rhapi.ui.socket_listen(EV_SET_ENABLED, controller.on_set_enabled)
+    # panel Classic/YGR switch (which tuning school a race is judged by)
+    rhapi.ui.socket_listen(EV_SET_MODE, controller.on_set_mode)
 
     # Real-time (fully local) in-race marshalling guard:
     # catches missed passes (holeshot) and re-tunes EnterAt/ExitAt live.

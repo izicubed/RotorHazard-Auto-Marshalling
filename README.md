@@ -71,6 +71,27 @@ panel), capped per pilot per race, and logged.
   per-pilot self-checks, and a holeshot-aware scored lap count. Saved-race
   values only; live node thresholds are changed by the real-time layer alone.
 
+## Two tuning schools: Classic and YGR
+
+A band that is a defect under one calibration style is the whole point of
+another, so the plugin has to know which one your timer is tuned in. A switch in
+the panel header — **Classic | YGR** — decides how a race is judged and what a
+repair looks like.
+
+- **Classic** is the RotorHazard handbook band: EnterAt below every real
+  crossing peak, ExitAt far below it but clear of the noise floor. The wide gap
+  is hysteresis, holding a pass together through the dips in its own peak.
+- **YGR** parks ExitAt **1–2 counts under EnterAt**. Named after the pilot who
+  arrived at it, who has run his own timer this way for two seasons of club
+  racing. One threshold to tune instead of two, two passes can never merge into
+  one crossing, and the lap moment is pinned to the threshold crossing itself —
+  paid for with duplicate crossings that RotorHazard's Minimum-Lap-Time
+  resolution collapses back into single passes.
+
+With YGR selected the plugin stops reporting the squeezed band and the duplicate
+crossings as faults, and a re-tune keeps ExitAt tucked under EnterAt instead of
+widening it. Full description in the [plugin README](custom_plugins/auto_marshal/README.md).
+
 ## UI
 
 A compact live panel on the **Run** page (auto flow of the just-saved heat,
@@ -78,8 +99,9 @@ with Stop) and the **Marshal** page (per-pilot / whole-race manual runs), plus
 the real-time corrections feed. The panel header carries an **AUTO: ON/OFF**
 master toggle — one click disables every automatic action (the post-race flow
 and the in-race guard) for heats where you don't want it; manual runs from the
-Marshal page keep working. Both panels support **dark / light / auto**
-(browser/OS) themes — Settings → *Panel theme*.
+Marshal page keep working — and the **Classic | YGR** tuning-school switch
+described above. Both panels support **dark / light / auto** (browser/OS)
+themes — Settings → *Panel theme*.
 
 ## Requirements
 

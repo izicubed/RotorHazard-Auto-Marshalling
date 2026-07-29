@@ -194,6 +194,26 @@
 }
 #rh-cm .rh-cm-toggle.rh-cm-toggle-off:hover { background: var(--cm-cancel-hover); }
 
+/* Tuning-school switch (Classic | YGR) in the panel header. A segmented pair:
+   the selected school is lit, the other reads as a plain label so the header
+   stays quiet — this is a setting, not an action. */
+#rh-cm .rh-cm-school {
+	display: flex; flex: 0 0 auto; align-items: stretch;
+	border: 1px solid var(--cm-btn-border); border-radius: 9px;
+	overflow: hidden; line-height: 1.5;
+}
+#rh-cm .rh-cm-sch {
+	appearance: none; -webkit-appearance: none; cursor: pointer;
+	background: transparent; color: var(--cm-muted);
+	border: 0; padding: 1px 7px; font-size: 9px; font-weight: 700;
+	letter-spacing: 0.04em; text-transform: uppercase; font-family: inherit;
+}
+#rh-cm .rh-cm-sch + .rh-cm-sch { border-left: 1px solid var(--cm-btn-border); }
+#rh-cm .rh-cm-sch:hover { color: var(--cm-fg); }
+#rh-cm .rh-cm-sch.rh-cm-sch-on {
+	background: var(--cm-chip-info-bg); color: var(--cm-chip-info-fg);
+}
+
 #rh-cm {
 	display: block; width: 100%; max-width: 520px; margin: 7px auto;
 	box-sizing: border-box; background: var(--cm-bg);
