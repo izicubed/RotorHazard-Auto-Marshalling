@@ -91,7 +91,8 @@ TUNE_STRONG_FRACTION = 0.7  # rise share of the pilot's prior to re-tune on 1st 
 TUNE_CAP_FRACTION = 0.55   # EnterAt never re-tuned below floor + this x prior rise
 ADD_MATCH_SECS = 1.2       # feedback: an added lap survives if a final lap is this close
 HOLD_SECS = 4.5            # approach-ripple guard: floor for the hold-off window
-HOLD_MIN_LAP_FRACTION = 0.6  # ...scaled to Minimum Lap Time (see _hold_secs)
+HOLD_MIN_LAP_FRACTION = 1.0  # ...the full Minimum Lap Time: two crossings inside
+                             # it are one pass by definition (see _hold_secs)
 HOLD_SECS_MAX = 12.0       # ...but never hold a pass back longer than this
 PRIOR_TRACES = 2           # prior pilotraces parsed per seat for peak estimation
 TIMER_SOURCES = (0, 2, 3)  # LapSource REALTIME / RECALC / AUTOMATIC
@@ -701,11 +702,16 @@ class RealtimeGuard:
         # history shows noise ripples overlapping their weakest real passes
         # (tune_ok False) are never re-tuned down — laps are filled one by
         # one and the operator's high EnterAt stays authoritative.
-        strong = rise >= (TUNE_STRONG_FRACTION * prior_rise if prior_rise
-                          else 1.5 * opts['min_rise'])
-        if opts['tune'] and prior.get('tune_ok', True) \
-                and (strong or (st.get('adds', 0) >= 1 and prior_rise)):
-            tuned = self._tune(ctx, node, floor, peak, prior_rise)
+        # Without any saved-race history (prior_rise unknown) there is no
+        # measure of what this pilot's real passes look like, so a single
+        # sub-EnterAt peak is never allowed to move the calibration: one
+        # ripple anchoring EnterAt just under its own peak parks the node
+        # inside the approach-ripple band for the rest of the race.
+        strong = bool(prior_rise) and rise >= TUNE_STRONG_FRACTION * prior_rise
+        if opts['tune'] and prior.get('tune_ok', True) and prior_rise \
+                and (strong or st.get('adds', 0) >= 1):
+            tuned = self._tune(ctx, node, floor, peak, prior_rise,
+                               prior.get('noise_rise'))
 
         # in First Lap / Staggered formats the first crossing is a scored lap,
         # not a holeshot — RotorHazard numbers it per the format either way,
@@ -757,7 +763,7 @@ class RealtimeGuard:
 
     # ------------------------------------------------------------ corrections
 
-    def _tune(self, ctx, node, floor, peak, prior_rise=None):
+    def _tune(self, ctx, node, floor, peak, prior_rise=None, noise_rise=None):
         '''Re-tune the live node thresholds around the observed missed peak.
         Follows doc/Tuning Parameters.md: EnterAt below every true crossing
         peak and above the cruising noise; ExitAt above the noise floor but
@@ -771,6 +777,13 @@ class RealtimeGuard:
             # peak itself sits below that band, leave the calibration alone —
             # the guard keeps filling such passes lap-by-lap instead.
             new_enter = max(new_enter, floor + int(TUNE_CAP_FRACTION * prior_rise))
+        if noise_rise:
+            # the pilot's measured off-gate ceiling is the hard lower bound:
+            # an EnterAt at or under it converts every approach ripple into a
+            # crossing. A weak-but-real pass under that bound still gets its
+            # lap filled by the guard — the calibration just stays put.
+            new_enter = max(new_enter,
+                            floor + noise_rise + NOISE_RISE_MARGIN + 1)
         changed = []
         if new_enter < peak and new_enter > floor \
                 and new_enter < (node.enter_at_level or 999):

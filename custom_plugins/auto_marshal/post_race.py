@@ -83,6 +83,8 @@ MODE_CLASSIC = 'classic'
 MODE_YGR = 'ygr'
 YGR_GAP = 2                # the gap the YGR school aims for
 YGR_BAND_MAX = 4           # a band this narrow or narrower is YGR-shaped
+PASS_MATCH_SECS = 2.5      # sample within this window of a stored lap = the pass
+ENTER_BAND_MARGIN = 2      # EnterAt this far above the ripple ceiling / under the weakest peak
 
 # History thresholds (spec §9.5)
 HIST_FAST_WARN = 0.75
@@ -989,9 +991,27 @@ class MarshalController:
     def _exit_candidates(enter_at, rmin, ygr):
         '''Where to put ExitAt for a given EnterAt, per tuning school.'''
         if ygr:
-            return [enter_at - g for g in (1, 2, 3) if enter_at - g > rmin]
+            return [enter_at - g for g in (1, 2) if enter_at - g > rmin]
         return [rmin + max(4, int(f * (enter_at - rmin)))
                 for f in (0.25, 0.35, 0.45)]
+
+    def _pass_band(self, run, vals, times, start_time):
+        '''The band EnterAt has to sit in: above the highest sample seen away
+        from the stored passes (the approach-ripple ceiling) and below the
+        weakest stored pass peak. Both come from timer-scored active laps
+        only — guard additions and manual edits are not signal evidence.'''
+        laps = [l for l in (self._safe(lambda:
+                self._rhdata.get_savedRaceLaps_by_savedPilotRace(run.id)) or [])
+                if not l.deleted and l.source in TIMER_SOURCES]
+        peaks = [l.peak_rssi for l in laps if getattr(l, 'peak_rssi', None)]
+        if not laps or not peaks or len(times) != len(vals):
+            return None, None
+        stamps = [start_time + l.lap_time_stamp / 1000.0 for l in laps]
+        ceiling = None
+        for v, t in zip(vals, times):
+            if all(abs(t - s) > PASS_MATCH_SECS for s in stamps):
+                ceiling = v if ceiling is None else max(ceiling, v)
+        return ceiling, min(peaks)
 
     def _reproduces_stored(self, run, laps, min_lap_ms):
         '''Does this candidate calibration produce exactly the passes the saved
@@ -1050,6 +1070,18 @@ class MarshalController:
         # squeezed or inverted band actually needs, and without it the stored
         # EnterAt is never even considered once the band is judged invalid.
         ygr = self._school() == MODE_YGR
+        # Both schools keep EnterAt by the same principle: above everything
+        # the pilot paints while NOT at the gate, below the weakest peak they
+        # cross with. The trace itself gives that band.
+        ceiling, weakest = self._pass_band(run, vals, times, start_time)
+        if ceiling is not None and weakest \
+                and weakest > ceiling + ENTER_BAND_MARGIN:
+            for e in dict.fromkeys((
+                    ceiling + ENTER_BAND_MARGIN,
+                    (ceiling + weakest) // 2,
+                    weakest - ENTER_BAND_MARGIN)):
+                for x in self._exit_candidates(e, lo, ygr):
+                    cands.append((int(e), int(x)))
         for de in (0, -2, 2):
             e = (run.enter_at or 0) + de
             if not (lo < e <= hi):
@@ -1068,6 +1100,10 @@ class MarshalController:
         best = None
         for e, x in dict.fromkeys(cands):
             if not (lo < x < e <= hi):
+                continue
+            # an EnterAt at or under the ripple ceiling re-triggers on every
+            # approach — never propose one when the ceiling is known
+            if ceiling is not None and e <= ceiling:
                 continue
             # Sibling rounds are a candidate source, so a squeezed band on one
             # round would otherwise be copied onto all the others. Never
